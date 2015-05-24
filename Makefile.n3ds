@@ -107,5 +107,11 @@ all: $(OBJS) $(TARGET_LIB)
 $(TARGET_LIB): $(OBJS)
 	$(AR) -rc $@ $^
 
+install: $(TARGET_LIB)
+	@cp  $(TARGET_LIB) "$(DEVKITPRO)/portlibs/armv6k/lib"
+	@mkdir -p "$(DEVKITPRO)/portlibs/armv6k/include/SDL2"
+	@cp include/*.h "$(DEVKITPRO)/portlibs/armv6k/include/SDL2"
+	@echo "Installed!"
+
 clean:
 	@rm -rf $(OBJS) $(TARGET_LIB)
