@@ -37,9 +37,6 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <vram.h>*/
-#define vabsptr(x) ((void *)x)
-
-
 
 
 /* 3DS renderer implementation, based on the CTRULIB  */
@@ -97,46 +94,57 @@ SDL_RenderDriver N3DS_RenderDriver = {
 SDL_RenderDriver N3DS_RenderDriver = {
     .CreateRenderer = N3DS_CreateRenderer,
     .info = {
-        .name = "PSP",
+        .name = "3DS",
         .flags = SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC | SDL_RENDERER_TARGETTEXTURE,
         .num_texture_formats = 4,
         .texture_formats = { [0] = SDL_PIXELFORMAT_BGR565,
-                                                 [1] = SDL_PIXELFORMAT_ABGR1555,
-                                                 [2] = SDL_PIXELFORMAT_ABGR4444,
-                                                 [3] = SDL_PIXELFORMAT_ABGR8888,
+	                     [1] = SDL_PIXELFORMAT_ABGR1555,
+	                     [2] = SDL_PIXELFORMAT_ABGR4444,
+	                     [3] = SDL_PIXELFORMAT_ABGR8888,
         },
         .max_texture_width = 512,
         .max_texture_height = 512,
      }
 };
 
-#define N3DS_SCREEN_WIDTH    480
-#define N3DS_SCREEN_HEIGHT   272
+#define N3DS_SCREEN_WIDTH    400
+#define N3DS_SCREEN_HEIGHT   240
 
 #define N3DS_FRAME_BUFFER_WIDTH  512
 #define N3DS_FRAME_BUFFER_SIZE   (N3DS_FRAME_BUFFER_WIDTH*N3DS_SCREEN_HEIGHT)
 
-static unsigned int __attribute__((aligned(16))) DisplayList[262144];
+#define N3DS_GPU_FIFO_SIZE       0x80000
+//static unsigned int __attribute__((aligned(16))) DisplayList[262144];
 
-
+#define RGBA8(r, g, b, a) ((((r)&0xFF)<<24) | (((g)&0xFF)<<16) | (((b)&0xFF)<<8) | (((a)&0xFF)<<0))
 #define COL5650(r,g,b,a)    ((r>>3) | ((g>>2)<<5) | ((b>>3)<<11))
 #define COL5551(r,g,b,a)    ((r>>3) | ((g>>3)<<5) | ((b>>3)<<10) | (a>0?0x7000:0))
 #define COL4444(r,g,b,a)    ((r>>4) | ((g>>4)<<4) | ((b>>4)<<8) | ((a>>4)<<12))
 #define COL8888(r,g,b,a)    ((r) | ((g)<<8) | ((b)<<16) | ((a)<<24))
 
 
+
 typedef struct
 {
-    void*           frontbuffer ;
-    void*           backbuffer ;
-    SDL_bool        initialized ;
-    SDL_bool        displayListAvail ;
-    unsigned int    psm ;
-    unsigned int    bpp ;
+	// GPU commando fifo
+	u32 *gpu_cmd;
+	// GPU framebuffer address
+	u32 *gpu_fb_addr;
+	// GPU depth buffer address
+	u32 *gpu_depth_fb_addr;
 
-    SDL_bool        vsync;
-    unsigned int    currentColor;
-    int             currentBlendMode;
+
+
+	void*           frontbuffer;
+	void*           backbuffer;
+	SDL_bool        initialized ;
+	SDL_bool        displayListAvail ;
+	unsigned int    psm ;
+	unsigned int    bpp ;
+
+	SDL_bool        vsync;
+	unsigned int    currentColor;
+	int             currentBlendMode;
 
 } N3DS_RenderData;
 
@@ -169,6 +177,18 @@ typedef struct
 
 } VertTV;
 
+//stolen from staplebutt
+static void GPU_SetDummyTexEnv(u8 num)
+{
+	GPU_SetTexEnv(num,
+		GPU_TEVSOURCES(GPU_PREVIOUS, 0, 0),
+		GPU_TEVSOURCES(GPU_PREVIOUS, 0, 0),
+		GPU_TEVOPERANDS(0,0,0),
+		GPU_TEVOPERANDS(0,0,0),
+		GPU_REPLACE,
+		GPU_REPLACE,
+		0xFFFFFFFF);
+}
 
 /* Return next power of 2 */
 static int
@@ -218,31 +238,34 @@ PixelFormatTo3DSFMT(Uint32 format)
 void
 StartDrawing(SDL_Renderer * renderer)
 {
-    N3DS_RenderData *data = (N3DS_RenderData *) renderer->driverdata;
-    if(data->displayListAvail)
-        return;
+	N3DS_RenderData *data = (N3DS_RenderData *) renderer->driverdata;
+	if(data->displayListAvail)
+		return;
 
-    //sceGuStart(GU_DIRECT, DisplayList);
-    data->displayListAvail = SDL_TRUE;
+
+	GPUCMD_SetBufferOffset(0);
+	//sceGuStart(GU_DIRECT, DisplayList);
+
+	data->displayListAvail = SDL_TRUE;
 }
 
 
 int
-TextureSwizzle(N3DS_TextureData *psp_texture)
+TextureSwizzle(N3DS_TextureData *n3ds_texture)
 {
-    if(psp_texture->swizzled)
+    if(n3ds_texture->swizzled)
         return 1;
 
-    int bytewidth = psp_texture->textureWidth*(psp_texture->bits>>3);
-    int height = psp_texture->size / bytewidth;
+    int bytewidth = n3ds_texture->textureWidth*(n3ds_texture->bits>>3);
+    int height = n3ds_texture->size / bytewidth;
 
     int rowblocks = (bytewidth>>4);
     int rowblocksadd = (rowblocks-1)<<7;
     unsigned int blockaddress = 0;
-    unsigned int *src = (unsigned int*) psp_texture->data;
+    unsigned int *src = (unsigned int*) n3ds_texture->data;
 
     unsigned char *data = NULL;
-    data = malloc(psp_texture->size);
+    data = malloc(n3ds_texture->size);
 
     int j;
 
@@ -267,21 +290,21 @@ TextureSwizzle(N3DS_TextureData *psp_texture)
             blockaddress += rowblocksadd;
     }
 
-    free(psp_texture->data);
-    psp_texture->data = data;
-    psp_texture->swizzled = SDL_TRUE;
+    free(n3ds_texture->data);
+    n3ds_texture->data = data;
+    n3ds_texture->swizzled = SDL_TRUE;
 
     return 1;
 }
-int TextureUnswizzle(N3DS_TextureData *psp_texture)
+int TextureUnswizzle(N3DS_TextureData *n3ds_texture)
 {
-    if(!psp_texture->swizzled)
+    if(!n3ds_texture->swizzled)
         return 1;
 
     int blockx, blocky;
 
-    int bytewidth = psp_texture->textureWidth*(psp_texture->bits>>3);
-    int height = psp_texture->size / bytewidth;
+    int bytewidth = n3ds_texture->textureWidth*(n3ds_texture->bits>>3);
+    int height = n3ds_texture->size / bytewidth;
 
     int widthblocks = bytewidth/16;
     int heightblocks = height/8;
@@ -289,11 +312,11 @@ int TextureUnswizzle(N3DS_TextureData *psp_texture)
     int dstpitch = (bytewidth - 16)/4;
     int dstrow = bytewidth * 8;
 
-    unsigned int *src = (unsigned int*) psp_texture->data;
+    unsigned int *src = (unsigned int*) n3ds_texture->data;
 
     unsigned char *data = NULL;
 
-    data = malloc(psp_texture->size);
+    data = malloc(n3ds_texture->size);
 
     if(!data)
         return 0;
@@ -329,11 +352,11 @@ int TextureUnswizzle(N3DS_TextureData *psp_texture)
         ydst += dstrow;
     }
 
-    free(psp_texture->data);
+    free(n3ds_texture->data);
 
-    psp_texture->data = data;
+    n3ds_texture->data = data;
 
-    psp_texture->swizzled = SDL_FALSE;
+    n3ds_texture->swizzled = SDL_FALSE;
 
     return 1;
 }
@@ -341,113 +364,132 @@ int TextureUnswizzle(N3DS_TextureData *psp_texture)
 SDL_Renderer *
 N3DS_CreateRenderer(SDL_Window * window, Uint32 flags)
 {
+	SDL_Renderer *renderer;
+	N3DS_RenderData *data;
+	int pixelformat;
 
-    SDL_Renderer *renderer;
-    N3DS_RenderData *data;
-        int pixelformat;
-    renderer = (SDL_Renderer *) SDL_calloc(1, sizeof(*renderer));
-    if (!renderer) {
-        SDL_OutOfMemory();
-        return NULL;
-    }
+	renderer = (SDL_Renderer *) SDL_calloc(1, sizeof(*renderer));
+	if (!renderer) {
+		SDL_OutOfMemory();
+		return NULL;
+	}
 
-    data = (N3DS_RenderData *) SDL_calloc(1, sizeof(*data));
-    if (!data) {
-        N3DS_DestroyRenderer(renderer);
-        SDL_OutOfMemory();
-        return NULL;
-    }
+	data = (N3DS_RenderData *) SDL_calloc(1, sizeof(*data));
+	if (!data) {
+		N3DS_DestroyRenderer(renderer);
+		SDL_OutOfMemory();
+		return NULL;
+	}
 
+	renderer->WindowEvent = N3DS_WindowEvent;
+	renderer->CreateTexture = N3DS_CreateTexture;
+	renderer->UpdateTexture = N3DS_UpdateTexture;
+	renderer->LockTexture = N3DS_LockTexture;
+	renderer->UnlockTexture = N3DS_UnlockTexture;
+	renderer->SetRenderTarget = N3DS_SetRenderTarget;
+	renderer->UpdateViewport = N3DS_UpdateViewport;
+	renderer->RenderClear = N3DS_RenderClear;
+	renderer->RenderDrawPoints = N3DS_RenderDrawPoints;
+	renderer->RenderDrawLines = N3DS_RenderDrawLines;
+	renderer->RenderFillRects = N3DS_RenderFillRects;
+	renderer->RenderCopy = N3DS_RenderCopy;
+	renderer->RenderReadPixels = N3DS_RenderReadPixels;
+	renderer->RenderCopyEx = N3DS_RenderCopyEx;
+	renderer->RenderPresent = N3DS_RenderPresent;
+	renderer->DestroyTexture = N3DS_DestroyTexture;
+	renderer->DestroyRenderer = N3DS_DestroyRenderer;
+	renderer->info = N3DS_RenderDriver.info;
+	renderer->info.flags = (SDL_RENDERER_ACCELERATED | SDL_RENDERER_TARGETTEXTURE);
+	renderer->driverdata = data;
+	renderer->window = window;
 
-    renderer->WindowEvent = N3DS_WindowEvent;
-    renderer->CreateTexture = N3DS_CreateTexture;
-    renderer->UpdateTexture = N3DS_UpdateTexture;
-    renderer->LockTexture = N3DS_LockTexture;
-    renderer->UnlockTexture = N3DS_UnlockTexture;
-    renderer->SetRenderTarget = N3DS_SetRenderTarget;
-    renderer->UpdateViewport = N3DS_UpdateViewport;
-    renderer->RenderClear = N3DS_RenderClear;
-    renderer->RenderDrawPoints = N3DS_RenderDrawPoints;
-    renderer->RenderDrawLines = N3DS_RenderDrawLines;
-    renderer->RenderFillRects = N3DS_RenderFillRects;
-    renderer->RenderCopy = N3DS_RenderCopy;
-    renderer->RenderReadPixels = N3DS_RenderReadPixels;
-    renderer->RenderCopyEx = N3DS_RenderCopyEx;
-    renderer->RenderPresent = N3DS_RenderPresent;
-    renderer->DestroyTexture = N3DS_DestroyTexture;
-    renderer->DestroyRenderer = N3DS_DestroyRenderer;
-    renderer->info = N3DS_RenderDriver.info;
-    renderer->info.flags = (SDL_RENDERER_ACCELERATED | SDL_RENDERER_TARGETTEXTURE);
-    renderer->driverdata = data;
-    renderer->window = window;
+	if (data->initialized != SDL_FALSE)
+		return 0;
+	data->initialized = SDL_TRUE;
 
-    if (data->initialized != SDL_FALSE)
-        return 0;
-    data->initialized = SDL_TRUE;
+	if (flags & SDL_RENDERER_PRESENTVSYNC) {
+		data->vsync = SDL_TRUE;
+	} else {
+		data->vsync = SDL_FALSE;
+	}
 
-    if (flags & SDL_RENDERER_PRESENTVSYNC) {
-        data->vsync = SDL_TRUE;
-    } else {
-        data->vsync = SDL_FALSE;
-    }
+	pixelformat = PixelFormatTo3DSFMT(SDL_GetWindowPixelFormat(window));
+	switch (pixelformat) {
+	case GPU_RGBA4:
+	case GPU_RGB565:
+	case GPU_RGBA5551:
+		//data->frontbuffer = (unsigned int *)(N3DS_FRAME_BUFFER_SIZE<<1);
+		//data->backbuffer =  (unsigned int *)(0);
+		data->bpp = 2;
+		data->psm = pixelformat;
+		break;
+	default:
+		//data->frontbuffer = (unsigned int *)(N3DS_FRAME_BUFFER_SIZE<<2);
+		//data->backbuffer =  (unsigned int *)(0);
+		data->bpp = 4;
+		data->psm = GPU_RGBA8;
+		break;
+	}
 
-    pixelformat=PixelFormatTo3DSFMT(SDL_GetWindowPixelFormat(window));
-    switch(pixelformat)
-    {
-        case GPU_RGBA4:
-        case GPU_RGB565:
-        case GPU_RGBA5551:
-            data->frontbuffer = (unsigned int *)(N3DS_FRAME_BUFFER_SIZE<<1);
-            data->backbuffer =  (unsigned int *)(0);
-            data->bpp = 2;
-            data->psm = pixelformat;
-            break;
-        default:
-            data->frontbuffer = (unsigned int *)(N3DS_FRAME_BUFFER_SIZE<<2);
-            data->backbuffer =  (unsigned int *)(0);
-            data->bpp = 4;
-            data->psm = GPU_RGBA8;
-            break;
-    }
+	data->gpu_fb_addr       = vramMemAlign(400*240*4*2, 0x100);
+	data->gpu_depth_fb_addr = vramMemAlign(400*240*4*2, 0x100);
+	data->gpu_cmd           = linearAlloc(N3DS_GPU_FIFO_SIZE);
 
-    //sceGuInit();
-    /* setup GU */
-    //sceGuStart(GU_DIRECT, DisplayList);
-    //sceGuDrawBuffer(data->psm, data->frontbuffer, N3DS_FRAME_BUFFER_WIDTH);
-    //sceGuDispBuffer(N3DS_SCREEN_WIDTH, N3DS_SCREEN_HEIGHT, data->backbuffer, N3DS_FRAME_BUFFER_WIDTH);
+	gfxInitDefault();
+	GPU_Init(NULL);
+	gfxSet3D(false);
+	GPU_Reset(NULL, data->gpu_cmd, N3DS_GPU_FIFO_SIZE);
 
+	//Setup the shader
+	//data->dvlb = DVLB_ParseFile((u32 *)shader_vsh_shbin, shader_vsh_shbin_size);
+	//shaderProgramInit(&data->shader);
+	//shaderProgramSetVsh(&data->shader, &dvlb->DVLE[0]);
 
-    //sceGuOffset(2048 - (N3DS_SCREEN_WIDTH>>1), 2048 - (N3DS_SCREEN_HEIGHT>>1));
-    //sceGuViewport(2048, 2048, N3DS_SCREEN_WIDTH, N3DS_SCREEN_HEIGHT);
+	//Get shader uniform descriptors
+	//data->projection_desc = shaderInstanceGetUniformLocation(data->shader.vertexShader, "projection");
 
-    data->frontbuffer = vabsptr(data->frontbuffer);
-    data->backbuffer = vabsptr(data->backbuffer);
+	//shaderProgramUse(&data->shader);
 
-    /* Scissoring */
-    //sceGuScissor(0, 0, N3DS_SCREEN_WIDTH, N3DS_SCREEN_HEIGHT);
-    //sceGuEnable(GU_SCISSOR_TEST);
+	//matrix_init_orthographic(data->ortho_matrix_top, 0.0f, 400.0f, 0.0f, 240.0f, 0.0f, 1.0f);
+	//matrix_init_orthographic(data->ortho_matrix_bot, 0.0f, 320.0f, 0.0f, 240.0f, 0.0f, 1.0f);
+	//matrix_gpu_set_uniform(data->ortho_matrix_top, data->projection_desc);
 
-    /* Backface culling */
-    //sceGuFrontFace(GU_CCW);
-    //sceGuEnable(GU_CULL_FACE);
+	GPU_SetViewport((u32 *)osConvertVirtToPhys((u32)data->gpu_depth_fb_addr),
+		(u32 *)osConvertVirtToPhys((u32)data->gpu_fb_addr),
+		0, 0, 240, 400);
 
-    /* Texturing */
-    //sceGuEnable(GU_TEXTURE_2D);
-    //sceGuShadeModel(GU_SMOOTH);
-    //sceGuTexWrap(GU_REPEAT, GU_REPEAT);
+	GPU_DepthMap(-1.0f, 0.0f);
+	GPU_SetFaceCulling(GPU_CULL_NONE);
+	GPU_SetStencilTest(false, GPU_ALWAYS, 0x00, 0xFF, 0x00);
+	GPU_SetStencilOp(GPU_KEEP, GPU_KEEP, GPU_KEEP);
+	GPU_SetBlendingColor(0,0,0,0);
+	GPU_SetDepthTestAndWriteMask(true, GPU_GEQUAL, GPU_WRITE_ALL);
+	GPUCMD_AddMaskedWrite(GPUREG_0062, 0x1, 0);
+	GPUCMD_AddWrite(GPUREG_0118, 0);
 
-    /* Blending */
-    //sceGuEnable(GU_BLEND);
-    //sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+	GPU_SetAlphaBlending(
+		GPU_BLEND_ADD,
+		GPU_BLEND_ADD,
+		GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA,
+		GPU_ONE, GPU_ZERO
+	);
 
-    //sceGuTexFilter(GU_LINEAR,GU_LINEAR);
+	GPU_SetAlphaTest(false, GPU_ALWAYS, 0x00);
 
-    //sceGuFinish();
-    //sceGuSync(0,0);
-    //sceDisplayWaitVblankStartCB();
-    //sceGuDisplay(GU_TRUE);
+	GPU_SetDummyTexEnv(1);
+	GPU_SetDummyTexEnv(2);
+	GPU_SetDummyTexEnv(3);
+	GPU_SetDummyTexEnv(4);
+	GPU_SetDummyTexEnv(5);
 
-    return renderer;
+	GPUCMD_Finalize();
+	GPUCMD_FlushAndRun(NULL);
+	gspWaitForP3D();
+
+	consoleInit(GFX_BOTTOM, NULL); /* !!!! */
+	printf("SDL2\n");
+
+	return renderer;
 }
 
 static void
@@ -461,44 +503,44 @@ static int
 N3DS_CreateTexture(SDL_Renderer * renderer, SDL_Texture * texture)
 {
 /*      N3DS_RenderData *renderdata = (N3DS_RenderData *) renderer->driverdata; */
-    N3DS_TextureData* psp_texture = (N3DS_TextureData*) SDL_calloc(1, sizeof(*psp_texture));
+    N3DS_TextureData* n3ds_texture = (N3DS_TextureData*) SDL_calloc(1, sizeof(*n3ds_texture));
 
-    if(!psp_texture)
+    if(!n3ds_texture)
         return -1;
 
-    psp_texture->swizzled = SDL_FALSE;
-    psp_texture->width = texture->w;
-    psp_texture->height = texture->h;
-    psp_texture->textureHeight = TextureNextPow2(texture->h);
-    psp_texture->textureWidth = TextureNextPow2(texture->w);
-    psp_texture->format = PixelFormatTo3DSFMT(texture->format);
+    n3ds_texture->swizzled = SDL_FALSE;
+    n3ds_texture->width = texture->w;
+    n3ds_texture->height = texture->h;
+    n3ds_texture->textureHeight = TextureNextPow2(texture->h);
+    n3ds_texture->textureWidth = TextureNextPow2(texture->w);
+    n3ds_texture->format = PixelFormatTo3DSFMT(texture->format);
 
-    switch(psp_texture->format)
+    switch(n3ds_texture->format)
     {
         case GPU_RGB565:
         case GPU_RGBA5551:
         case GPU_RGBA4:
-            psp_texture->bits = 16;
+            n3ds_texture->bits = 16;
             break;
 
         case GPU_RGBA8:
-            psp_texture->bits = 32;
+            n3ds_texture->bits = 32;
             break;
 
         default:
             return -1;
     }
 
-    psp_texture->pitch = psp_texture->textureWidth * SDL_BYTESPERPIXEL(texture->format);
-    psp_texture->size = psp_texture->textureHeight*psp_texture->pitch;
-    psp_texture->data = SDL_calloc(1, psp_texture->size);
+    n3ds_texture->pitch = n3ds_texture->textureWidth * SDL_BYTESPERPIXEL(texture->format);
+    n3ds_texture->size = n3ds_texture->textureHeight*n3ds_texture->pitch;
+    n3ds_texture->data = SDL_calloc(1, n3ds_texture->size);
 
-    if(!psp_texture->data)
+    if(!n3ds_texture->data)
     {
-        SDL_free(psp_texture);
+        SDL_free(n3ds_texture);
         return SDL_OutOfMemory();
     }
-    texture->driverdata = psp_texture;
+    texture->driverdata = n3ds_texture;
 
     return 0;
 }
@@ -507,21 +549,21 @@ N3DS_CreateTexture(SDL_Renderer * renderer, SDL_Texture * texture)
 void
 TextureActivate(SDL_Texture * texture)
 {
-    N3DS_TextureData *psp_texture = (N3DS_TextureData *) texture->driverdata;
+    N3DS_TextureData *n3ds_texture = (N3DS_TextureData *) texture->driverdata;
     int scaleMode = GetScaleQuality();
 
     /* Swizzling is useless with small textures. */
     if (texture->w >= 16 || texture->h >= 16)
     {
-        TextureSwizzle(psp_texture);
+        TextureSwizzle(n3ds_texture);
     }
 
     //sceGuEnable(GU_TEXTURE_2D);
     //sceGuTexWrap(GU_REPEAT, GU_REPEAT);
-    //sceGuTexMode(psp_texture->format, 0, 0, psp_texture->swizzled);
+    //sceGuTexMode(n3ds_texture->format, 0, 0, n3ds_texture->swizzled);
     //sceGuTexFilter(scaleMode, scaleMode); /* GU_NEAREST good for tile-map */
                                           /* GU_LINEAR good for scaling */
-    //sceGuTexImage(0, psp_texture->textureWidth, psp_texture->textureHeight, psp_texture->textureWidth, psp_texture->data);
+    //sceGuTexImage(0, n3ds_texture->textureWidth, n3ds_texture->textureHeight, n3ds_texture->textureWidth, n3ds_texture->data);
     //sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
 }
 
@@ -530,7 +572,7 @@ static int
 N3DS_UpdateTexture(SDL_Renderer * renderer, SDL_Texture * texture,
                    const SDL_Rect * rect, const void *pixels, int pitch)
 {
-/*  N3DS_TextureData *psp_texture = (N3DS_TextureData *) texture->driverdata; */
+/*  N3DS_TextureData *n3ds_texture = (N3DS_TextureData *) texture->driverdata; */
     const Uint8 *src;
     Uint8 *dst;
     int row, length,dpitch;
@@ -556,19 +598,19 @@ static int
 N3DS_LockTexture(SDL_Renderer * renderer, SDL_Texture * texture,
                  const SDL_Rect * rect, void **pixels, int *pitch)
 {
-    N3DS_TextureData *psp_texture = (N3DS_TextureData *) texture->driverdata;
+    N3DS_TextureData *n3ds_texture = (N3DS_TextureData *) texture->driverdata;
 
     *pixels =
-        (void *) ((Uint8 *) psp_texture->data + rect->y * psp_texture->pitch +
+        (void *) ((Uint8 *) n3ds_texture->data + rect->y * n3ds_texture->pitch +
                   rect->x * SDL_BYTESPERPIXEL(texture->format));
-    *pitch = psp_texture->pitch;
+    *pitch = n3ds_texture->pitch;
     return 0;
 }
 
 static void
 N3DS_UnlockTexture(SDL_Renderer * renderer, SDL_Texture * texture)
 {
-    N3DS_TextureData *psp_texture = (N3DS_TextureData *) texture->driverdata;
+    N3DS_TextureData *n3ds_texture = (N3DS_TextureData *) texture->driverdata;
     SDL_Rect rect;
 
     /* We do whole texture updates, at least for now */
@@ -576,7 +618,7 @@ N3DS_UnlockTexture(SDL_Renderer * renderer, SDL_Texture * texture)
     rect.y = 0;
     rect.w = texture->w;
     rect.h = texture->h;
-    N3DS_UpdateTexture(renderer, texture, &rect, psp_texture->data, psp_texture->pitch);
+    N3DS_UpdateTexture(renderer, texture, &rect, n3ds_texture->data, n3ds_texture->pitch);
 }
 
 static int
@@ -627,14 +669,18 @@ N3DS_SetBlendMode(SDL_Renderer * renderer, int blendMode)
 
 
 static int
-N3DS_RenderClear(SDL_Renderer * renderer)
+N3DS_RenderClear(SDL_Renderer *renderer)
 {
-    /* start list */
-    StartDrawing(renderer);
-    int color = renderer->a << 24 | renderer->b << 16 | renderer->g << 8 | renderer->r;
-    //sceGuClearColor(color);
-    //sceGuClearDepth(0);
-    //sceGuClear(GU_COLOR_BUFFER_BIT|GU_DEPTH_BUFFER_BIT|GU_FAST_CLEAR_BIT);
+	N3DS_RenderData *data = (N3DS_RenderData *)renderer->driverdata;
+	/* start list */
+	StartDrawing(renderer);
+
+	//Clear the screen
+	u32 color = RGBA8(renderer->r, renderer->g, renderer->b, renderer->a);
+
+	GX_SetMemoryFill(NULL, data->gpu_fb_addr, color, &data->gpu_fb_addr[0x2EE00],
+		0x201, data->gpu_depth_fb_addr, 0x00000000, &data->gpu_depth_fb_addr[0x2EE00], 0x201);
+	gspWaitForPSC0();
 
     return 0;
 }
@@ -965,62 +1011,85 @@ N3DS_RenderCopyEx(SDL_Renderer * renderer, SDL_Texture * texture,
 static void
 N3DS_RenderPresent(SDL_Renderer * renderer)
 {
-    N3DS_RenderData *data = (N3DS_RenderData *) renderer->driverdata;
-    if(!data->displayListAvail)
-        return;
+	N3DS_RenderData *data = (N3DS_RenderData *) renderer->driverdata;
+	if (!data->displayListAvail)
+		return;
 
-    data->displayListAvail = SDL_FALSE;
-    //sceGuFinish();
-    //sceGuSync(0,0);
+	data->displayListAvail = SDL_FALSE;
 
-/*  if(data->vsync) */
-        //sceDisplayWaitVblankStart();
+	GPU_FinishDrawing();
+	GPUCMD_Finalize();
+	GPUCMD_FlushAndRun(NULL);
+	gspWaitForP3D();
 
-    data->backbuffer = data->frontbuffer;
-    int i = 0;//sceGuSwapBuffers();
-    data->frontbuffer = vabsptr(i);
+	//Copy the GPU rendered FB to the screen FB
+	GX_SetDisplayTransfer(NULL, data->gpu_fb_addr, GX_BUFFER_DIM(240, 400),
+		(u32 *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL),
+		GX_BUFFER_DIM(240, 400), 0x1000);
 
+	gspWaitForPPF();
+
+
+	/* Swap buffers */
+	gfxSwapBuffersGpu();
+	if (data->vsync) {
+		gspWaitForEvent(GSPEVENT_VBlank0, true);
+	}
+
+	//sceGuFinish();
+	//sceGuSync(0,0);
+	//sceGuSwapBuffers();
 }
 
 static void
 N3DS_DestroyTexture(SDL_Renderer * renderer, SDL_Texture * texture)
 {
     N3DS_RenderData *renderdata = (N3DS_RenderData *) renderer->driverdata;
-    N3DS_TextureData *psp_texture = (N3DS_TextureData *) texture->driverdata;
+    N3DS_TextureData *n3ds_texture = (N3DS_TextureData *) texture->driverdata;
 
     if (renderdata == 0)
         return;
 
-    if(psp_texture == 0)
+    if(n3ds_texture == 0)
         return;
 
-    SDL_free(psp_texture->data);
-    SDL_free(psp_texture);
+    SDL_free(n3ds_texture->data);
+    SDL_free(n3ds_texture);
     texture->driverdata = NULL;
 }
 
 static void
 N3DS_DestroyRenderer(SDL_Renderer * renderer)
 {
-    N3DS_RenderData *data = (N3DS_RenderData *) renderer->driverdata;
-    if (data) {
-        if (!data->initialized)
-            return;
+	N3DS_RenderData *data = (N3DS_RenderData *) renderer->driverdata;
+	if (data) {
+		if (!data->initialized)
+			return;
 
-        StartDrawing(renderer);
+		StartDrawing(renderer);
 
-        //sceGuTerm();
-/*      vfree(data->backbuffer); */
-/*      vfree(data->frontbuffer); */
+		gfxExit();
+		//shaderProgramFree(&data->shader);
+		//DVLB_Free(data->dvlb);
 
-        data->initialized = SDL_FALSE;
-        data->displayListAvail = SDL_FALSE;
-        SDL_free(data);
-    }
-    SDL_free(renderer);
+		//linearFree(data->pool_addr);
+		linearFree(data->gpu_cmd);
+		vramFree(data->gpu_fb_addr);
+		vramFree(data->gpu_depth_fb_addr);
+
+
+		//sceGuTerm();
+		/*      vfree(data->backbuffer); */
+		/*      vfree(data->frontbuffer); */
+
+		data->initialized = SDL_FALSE;
+		data->displayListAvail = SDL_FALSE;
+		SDL_free(data);
+	}
+	SDL_free(renderer);
 }
 
-#endif /* SDL_VIDEO_RENDER_PSP */
+#endif /* SDL_VIDEO_RENDER_3DS */
 
 /* vi: set ts=4 sw=4 expandtab: */
 

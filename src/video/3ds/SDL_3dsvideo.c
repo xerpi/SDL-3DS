@@ -164,8 +164,8 @@ N3DS_VideoInit(_THIS)
 
     SDL_zero(current_mode);
 
-    current_mode.w = 480;
-    current_mode.h = 272;
+    current_mode.w = 400;
+    current_mode.h = 240;
 
     current_mode.refresh_rate = 60;
     /* 32 bpp for default */
@@ -215,20 +215,22 @@ N3DS_SetDisplayMode(_THIS, SDL_VideoDisplay * display, SDL_DisplayMode * mode)
 int
 N3DS_CreateWindow(_THIS, SDL_Window * window)
 {
-    SDL_WindowData *wdata;
+	SDL_WindowData *wdata;
 
-    /* Allocate window internal data */
-    wdata = (SDL_WindowData *) SDL_calloc(1, sizeof(SDL_WindowData));
-    if (wdata == NULL) {
-        return SDL_OutOfMemory();
-    }
+	/* Allocate window internal data */
+	wdata = (SDL_WindowData *) SDL_calloc(1, sizeof(SDL_WindowData));
+		if (wdata == NULL) {
+		return SDL_OutOfMemory();
+	}
 
-    /* Setup driver data for this window */
-    window->driverdata = wdata;
+	/* Setup driver data for this window */
+	window->driverdata = wdata;
 
+	/* Set the keyboard focus */
+	SDL_SetKeyboardFocus(window);
 
-    /* Window has been successfully created */
-    return 0;
+	/* Window has been successfully created */
+	return 0;
 }
 
 int

@@ -23,8 +23,7 @@
 #if SDL_JOYSTICK_3DS
 
 /* This is the 3DS implementation of the SDL joystick API */
-//#include <pspctrl.h>
-//#include <pspkernel.h>
+#include <3ds.h>
 
 #include <stdio.h>      /* For the definition of NULL */
 #include <stdlib.h>
@@ -43,11 +42,11 @@
 static SDL_sem *pad_sem = NULL;
 static SDL_Thread *thread = NULL;
 static int running = 0;
-/*static const enum PspCtrlButtons button_map[] = {
-    PSP_CTRL_TRIANGLE, PSP_CTRL_CIRCLE, PSP_CTRL_CROSS, PSP_CTRL_SQUARE,
-    PSP_CTRL_LTRIGGER, PSP_CTRL_RTRIGGER,
-    PSP_CTRL_DOWN, PSP_CTRL_LEFT, PSP_CTRL_UP, PSP_CTRL_RIGHT,
-    PSP_CTRL_SELECT, PSP_CTRL_START, PSP_CTRL_HOME, PSP_CTRL_HOLD };*/
+static const u32 button_map[] = {
+    KEY_X, KEY_A, KEY_B, KEY_Y,
+    KEY_L, KEY_R,
+    KEY_DOWN, KEY_LEFT, KEY_UP, KEY_RIGHT,
+    KEY_SELECT, KEY_START, KEY_TOUCH };
 static int analog_map[256];  /* Map analog inputs to -32768 -> 32767 */
 
 typedef struct
@@ -85,17 +84,17 @@ static int calc_bezier_y(float t)
 /*
  * Collect pad data about once per frame
  */
-int JoystickUpdate(void *data)
+/*int JoystickUpdate(void *data)
 {
     while (running) {
         SDL_SemWait(pad_sem);
-        //sceCtrlPeekBufferPositive(&pad, 1);
+        // hidScanInput();
         SDL_SemPost(pad_sem);
-        /* Delay 1/60th of a second */
+        // Delay 1/60th of a second
         //sceKernelDelayThread(1000000 / 60);
     }
     return 0;
-}
+}*/
 
 
 
@@ -112,13 +111,13 @@ int SDL_SYS_JoystickInit(void)
     //sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
 
     /* Start thread to read data */
-    if((pad_sem =  SDL_CreateSemaphore(1)) == NULL) {
+    /*if((pad_sem =  SDL_CreateSemaphore(1)) == NULL) {
         return SDL_SetError("Can't create input semaphore");
     }
     running = 1;
-    if((thread = SDL_CreateThread(JoystickUpdate, "JoySitckThread",NULL)) == NULL) {
+    if((thread = SDL_CreateThread(JoystickUpdate, "JoySitckThread", NULL)) == NULL) {
         return SDL_SetError("Can't create input thread");
-    }
+    }*/
 
     /* Create an accurate map from analog inputs (0 to 255)
        to SDL joystick positions (-32768 to 32767) */
@@ -170,7 +169,7 @@ const char *SDL_SYS_JoystickName(int index)
  */
 int SDL_SYS_JoystickOpen(SDL_Joystick *joystick, int device_index)
 {
-    joystick->nbuttons = 14;
+    joystick->nbuttons = 13;
     joystick->naxes = 2;
     joystick->nhats = 0;
 
@@ -190,46 +189,52 @@ SDL_bool SDL_SYS_JoystickAttached(SDL_Joystick *joystick)
  */
 void SDL_SYS_JoystickUpdate(SDL_Joystick *joystick)
 {
-#if 0
-    int i;
-    enum PspCtrlButtons buttons;
-    enum PspCtrlButtons changed;
-    unsigned char x, y;
-    static enum PspCtrlButtons old_buttons = 0;
-    static unsigned char old_x = 0, old_y = 0;
+	int i;
+	u32 buttons;
+	u32 changed;
+	touchPosition touch;
+	circlePosition circle;
+	unsigned char x, y;
+	static u32 old_buttons = 0;
+	static unsigned char old_x = 0, old_y = 0;
 
-    SDL_SemWait(pad_sem);
-    buttons = pad.Buttons;
-    x = pad.Lx;
-    y = pad.Ly;
-    SDL_SemPost(pad_sem);
+	hidScanInput();
+	hidTouchRead(&touch);
+	hidCircleRead(&circle);
 
-    /* Axes */
-    if(old_x != x) {
-        SDL_PrivateJoystickAxis(joystick, 0, analog_map[x]);
-        old_x = x;
-    }
-    if(old_y != y) {
-        SDL_PrivateJoystickAxis(joystick, 1, analog_map[y]);
-        old_y = y;
-    }
+	//SDL_SemWait(pad_sem);
+	buttons = hidKeysHeld();
+	//printf("held: %i\n", buttons);
+	x = circle.dx;
+	y = circle.dy;
+	//SDL_SemPost(pad_sem);
 
-    /* Buttons */
-    changed = old_buttons ^ buttons;
-    old_buttons = buttons;
-    if(changed) {
-        for(i=0; i<sizeof(button_map)/sizeof(button_map[0]); i++) {
-            if(changed & button_map[i]) {
-                SDL_PrivateJoystickButton(
-                    joystick, i,
-                    (buttons & button_map[i]) ?
-                    SDL_PRESSED : SDL_RELEASED);
-            }
-        }
-    }
+	/* Axes */
+	if(old_x != x) {
+		SDL_PrivateJoystickAxis(joystick, 0, analog_map[x]);
+		old_x = x;
+	}
+	if(old_y != y) {
+		SDL_PrivateJoystickAxis(joystick, 1, analog_map[y]);
+		old_y = y;
+	}
 
-    //sceKernelDelayThread(0);
-#endif
+	/* Buttons */
+	changed = old_buttons ^ buttons;
+	old_buttons = buttons;
+
+
+	if (changed) {
+		for(i = 0; i < sizeof(button_map)/sizeof(button_map[0]); i++) {
+			if(changed & button_map[i]) {
+				SDL_PrivateJoystickButton( joystick, i,
+					(buttons & button_map[i]) ?
+						SDL_PRESSED :
+						SDL_RELEASED);
+			}
+		}
+	}
+	//sceKernelDelayThread(0);
 }
 
 /* Function to close a joystick after use */
