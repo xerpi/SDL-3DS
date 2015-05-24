@@ -19,39 +19,27 @@
   3. This notice may not be removed or altered from any source distribution.
 */
 
-#ifndef _SDL_config_h
-#define _SDL_config_h
+#ifndef _SDL_3dsaudio_h
+#define _SDL_3dsaudio_h
 
-#include "SDL_platform.h"
+#include "../SDL_sysaudio.h"
 
-/**
- *  \file SDL_config.h
+/* Hidden "this" pointer for the audio functions */
+#define _THIS   SDL_AudioDevice *this
+
+#define NUM_BUFFERS 2
+
+struct SDL_PrivateAudioData {
+    /* The hardware output channel. */
+    int     channel;
+    /* The raw allocated mixing buffer. */
+    Uint8   *rawbuf;
+    /* Individual mixing buffers. */
+    Uint8   *mixbufs[NUM_BUFFERS];
+    /* Index of the next available mixing buffer. */
+    int     next_buffer;
+};
+
+#endif /* _SDL_3dsaudio_h */
+/* vim: ts=4 sw=4
  */
-
-/* Add any platform that doesn't build using the configure system. */
-#ifdef USING_PREMAKE_CONFIG_H
-#include "SDL_config_premake.h"
-#elif defined(__WIN32__)
-#include "SDL_config_windows.h"
-#elif defined(__WINRT__)
-#include "SDL_config_winrt.h"
-#elif defined(__MACOSX__)
-#include "SDL_config_macosx.h"
-#elif defined(__IPHONEOS__)
-#include "SDL_config_iphoneos.h"
-#elif defined(__ANDROID__)
-#include "SDL_config_android.h"
-#elif defined(__PSP__)
-#include "SDL_config_psp.h"
-#elif defined(__3DS__)
-#include "SDL_config_3ds.h"
-#else
-/* This is a minimal configuration just to get SDL running on new platforms */
-#include "SDL_config_minimal.h"
-#endif /* platform config */
-
-#ifdef USING_GENERATED_CONFIG_H
-#error Wrong SDL_config.h, check your include path?
-#endif
-
-#endif /* _SDL_config_h */

@@ -1,3 +1,4 @@
+
 /*
   Simple DirectMedia Layer
   Copyright (C) 1997-2014 Sam Lantinga <slouken@libsdl.org>
@@ -140,6 +141,10 @@
 #if defined(__PSP__)
 #undef __PSP__
 #define __PSP__ 1
+#endif
+#if defined(__3DS__)
+#undef __3DS__
+#define __3DS__ 1
 #endif
 
 /* The NACL compiler defines __native_client__ and __pnacl__

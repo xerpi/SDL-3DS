@@ -34,6 +34,8 @@
 #include "windows/SDL_systhread_c.h"
 #elif SDL_THREAD_PSP
 #include "psp/SDL_systhread_c.h"
+#elif SDL_THREAD_3DS
+#include "3ds/SDL_systhread_c.h"
 #elif SDL_THREAD_STDCPP
 #include "stdcpp/SDL_systhread_c.h"
 #else
