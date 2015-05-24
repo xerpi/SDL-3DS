@@ -114,6 +114,7 @@ SDL_RenderDriver N3DS_RenderDriver = {
 #define N3DS_FRAME_BUFFER_SIZE   (N3DS_FRAME_BUFFER_WIDTH*N3DS_SCREEN_HEIGHT)
 
 #define N3DS_GPU_FIFO_SIZE       0x80000
+#define N3DS_TEMPPOOL_SIZE       0x80000
 //static unsigned int __attribute__((aligned(16))) DisplayList[262144];
 
 #define RGBA8(r, g, b, a) ((((r)&0xFF)<<24) | (((g)&0xFF)<<16) | (((b)&0xFF)<<8) | (((a)&0xFF)<<0))
@@ -132,7 +133,10 @@ typedef struct
 	u32 *gpu_fb_addr;
 	// GPU depth buffer address
 	u32 *gpu_depth_fb_addr;
-
+	// Temporary memory pool
+	void *pool_addr;
+	u32 pool_index;
+	u32 pool_size;
 
 
 	void*           frontbuffer;
@@ -190,6 +194,37 @@ static void GPU_SetDummyTexEnv(u8 num)
 		0xFFFFFFFF);
 }
 
+void *N3DS_pool_malloc(N3DS_RenderData *data, u32 size)
+{
+	if ((data->pool_index + size) < data->pool_size) {
+		void *addr = (void *)((u32)data->pool_addr + data->pool_index);
+		data->pool_index += size;
+		return addr;
+	}
+	return NULL;
+}
+
+void *N3DS_pool_memalign(N3DS_RenderData *data, u32 size, u32 alignment)
+{
+	u32 new_index = (data->pool_index + alignment - 1) & ~(alignment - 1);
+	if ((new_index + size) < data->pool_size) {
+		void *addr = (void *)((u32)data->pool_addr + new_index);
+		data->pool_index = new_index + size;
+		return addr;
+	}
+	return NULL;
+}
+
+unsigned int N3DS_pool_space_free(N3DS_RenderData *data)
+{
+	return data->pool_size - data->pool_index;
+}
+
+void N3DS_pool_reset(N3DS_RenderData *data)
+{
+	data->pool_index = 0;
+}
+
 /* Return next power of 2 */
 static int
 TextureNextPow2(unsigned int w)
@@ -242,7 +277,7 @@ StartDrawing(SDL_Renderer * renderer)
 	if(data->displayListAvail)
 		return;
 
-
+	N3DS_pool_reset(data);
 	GPUCMD_SetBufferOffset(0);
 	//sceGuStart(GU_DIRECT, DisplayList);
 
@@ -361,6 +396,7 @@ int TextureUnswizzle(N3DS_TextureData *n3ds_texture)
     return 1;
 }
 
+
 SDL_Renderer *
 N3DS_CreateRenderer(SDL_Window * window, Uint32 flags)
 {
@@ -434,6 +470,8 @@ N3DS_CreateRenderer(SDL_Window * window, Uint32 flags)
 	data->gpu_fb_addr       = vramMemAlign(400*240*4*2, 0x100);
 	data->gpu_depth_fb_addr = vramMemAlign(400*240*4*2, 0x100);
 	data->gpu_cmd           = linearAlloc(N3DS_GPU_FIFO_SIZE);
+	data->pool_addr         = linearAlloc(N3DS_TEMPPOOL_SIZE);
+	data->pool_size         = N3DS_TEMPPOOL_SIZE;
 
 	gfxInitDefault();
 	GPU_Init(NULL);
@@ -485,6 +523,8 @@ N3DS_CreateRenderer(SDL_Window * window, Uint32 flags)
 	GPUCMD_Finalize();
 	GPUCMD_FlushAndRun(NULL);
 	gspWaitForP3D();
+
+	N3DS_pool_reset(data);
 
 	consoleInit(GFX_BOTTOM, NULL); /* !!!! */
 	printf("SDL2\n");
@@ -689,10 +729,11 @@ static int
 N3DS_RenderDrawPoints(SDL_Renderer * renderer, const SDL_FPoint * points,
                       int count)
 {
+    N3DS_RenderData *data = (N3DS_RenderData *)renderer->driverdata;
     int color = renderer->a << 24 | renderer->b << 16 | renderer->g << 8 | renderer->r;
     int i;
     StartDrawing(renderer);
-    VertV* vertices = (VertV*)NULL;//sceGuGetMemory(count*sizeof(VertV)); 3DS STUB
+    VertV* vertices = (VertV*)N3DS_pool_malloc(data, count*sizeof(VertV));
 
     for (i = 0; i < count; ++i) {
             vertices[i].x = points[i].x;
@@ -713,10 +754,11 @@ static int
 N3DS_RenderDrawLines(SDL_Renderer * renderer, const SDL_FPoint * points,
                      int count)
 {
+    N3DS_RenderData *data = (N3DS_RenderData *)renderer->driverdata;
     int color = renderer->a << 24 | renderer->b << 16 | renderer->g << 8 | renderer->r;
     int i;
     StartDrawing(renderer);
-    VertV* vertices = (VertV*)NULL;//sceGuGetMemory(count*sizeof(VertV)); 3DS STUB
+    VertV* vertices = (VertV*)N3DS_pool_malloc(data, count*sizeof(VertV));
 
     for (i = 0; i < count; ++i) {
             vertices[i].x = points[i].x;
@@ -738,13 +780,14 @@ static int
 N3DS_RenderFillRects(SDL_Renderer * renderer, const SDL_FRect * rects,
                      int count)
 {
+    N3DS_RenderData *data = (N3DS_RenderData *) renderer->driverdata;
     int color = renderer->a << 24 | renderer->b << 16 | renderer->g << 8 | renderer->r;
     int i;
     StartDrawing(renderer);
 
     for (i = 0; i < count; ++i) {
         const SDL_FRect *rect = &rects[i];
-        VertV* vertices = (VertV*)NULL;//sceGuGetMemory((sizeof(VertV)<<1)); 3DS STUB
+        VertV* vertices = (VertV*)N3DS_pool_malloc(data, (sizeof(VertV)<<1));
         vertices[0].x = rect->x;
         vertices[0].y = rect->y;
         vertices[0].z = 0.0f;
@@ -809,6 +852,7 @@ static int
 N3DS_RenderCopy(SDL_Renderer * renderer, SDL_Texture * texture,
                 const SDL_Rect * srcrect, const SDL_FRect * dstrect)
 {
+    N3DS_RenderData *data = (N3DS_RenderData *) renderer->driverdata;
     float x, y, width, height;
     float u0, v0, u1, v1;
     unsigned char alpha;
@@ -840,7 +884,7 @@ N3DS_RenderCopy(SDL_Renderer * renderer, SDL_Texture * texture,
 
     if((MathAbs(u1) - MathAbs(u0)) < 64.0f)
     {
-        VertTV* vertices = (VertTV*)NULL;//sceGuGetMemory((sizeof(VertTV))<<1); 3DS STUB
+        VertTV* vertices = (VertTV*)N3DS_pool_malloc(data, (sizeof(VertTV))<<1);
 
         vertices[0].u = u0;
         vertices[0].v = v0;
@@ -870,7 +914,7 @@ N3DS_RenderCopy(SDL_Renderer * renderer, SDL_Texture * texture,
 
         for(start = 0, end = width; start < end; start += slice)
         {
-            VertTV* vertices = (VertTV*)NULL;//sceGuGetMemory((sizeof(VertTV))<<1); 3DS STUB
+            VertTV* vertices = (VertTV*)N3DS_pool_malloc(data, (sizeof(VertTV))<<1);
 
             float polyWidth = ((curX + slice) > endX) ? (endX - curX) : slice;
             float sourceWidth = ((curU + ustep) > u1) ? (u1 - curU) : ustep;
@@ -913,6 +957,7 @@ N3DS_RenderCopyEx(SDL_Renderer * renderer, SDL_Texture * texture,
                 const SDL_Rect * srcrect, const SDL_FRect * dstrect,
                 const double angle, const SDL_FPoint *center, const SDL_RendererFlip flip)
 {
+    N3DS_RenderData *data = (N3DS_RenderData *) renderer->driverdata;
     float x, y, width, height;
     float u0, v0, u1, v1;
     unsigned char alpha;
@@ -966,7 +1011,7 @@ N3DS_RenderCopyEx(SDL_Renderer * renderer, SDL_Texture * texture,
     float ch = c*height;
     float sh = s*height;
 
-    VertTV* vertices = (VertTV*)NULL;//sceGuGetMemory(sizeof(VertTV)<<2); 3DS STUB
+    VertTV* vertices = (VertTV*)N3DS_pool_malloc(data, sizeof(VertTV)<<2);
 
     vertices[0].u = u0;
     vertices[0].v = v0;
@@ -1072,7 +1117,7 @@ N3DS_DestroyRenderer(SDL_Renderer * renderer)
 		//shaderProgramFree(&data->shader);
 		//DVLB_Free(data->dvlb);
 
-		//linearFree(data->pool_addr);
+		linearFree(data->pool_addr);
 		linearFree(data->gpu_cmd);
 		vramFree(data->gpu_fb_addr);
 		vramFree(data->gpu_depth_fb_addr);
