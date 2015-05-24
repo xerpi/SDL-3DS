@@ -127,7 +127,7 @@ N3DS_Create()
     device->SetWindowGrab = N3DS_SetWindowGrab;
     device->DestroyWindow = N3DS_DestroyWindow;
     device->GetWindowWMInfo = N3DS_GetWindowWMInfo;
-    device->GL_LoadLibrary = N3DS_GL_LoadLibrary;
+    /*device->GL_LoadLibrary = N3DS_GL_LoadLibrary; 3DS STUB
     device->GL_GetProcAddress = N3DS_GL_GetProcAddress;
     device->GL_UnloadLibrary = N3DS_GL_UnloadLibrary;
     device->GL_CreateContext = N3DS_GL_CreateContext;
@@ -135,7 +135,7 @@ N3DS_Create()
     device->GL_SetSwapInterval = N3DS_GL_SetSwapInterval;
     device->GL_GetSwapInterval = N3DS_GL_GetSwapInterval;
     device->GL_SwapWindow = N3DS_GL_SwapWindow;
-    device->GL_DeleteContext = N3DS_GL_DeleteContext;
+    device->GL_DeleteContext = N3DS_GL_DeleteContext;*/
     device->HasScreenKeyboardSupport = N3DS_HasScreenKeyboardSupport;
     device->ShowScreenKeyboard = N3DS_ShowScreenKeyboard;
     device->HideScreenKeyboard = N3DS_HideScreenKeyboard;

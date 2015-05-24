@@ -20,7 +20,7 @@
 */
 #include "../../SDL_internal.h"
 
-#if SDL_THREAD_PSP
+#if SDL_THREAD_3DS
 
 /* An implementation of mutexes using semaphores */
 
@@ -131,6 +131,6 @@ SDL_mutexV(SDL_mutex * mutex)
 #endif /* SDL_THREADS_DISABLED */
 }
 
-#endif /* SDL_THREAD_PSP */
+#endif /* SDL_THREAD_3DS */
 
 /* vi: set ts=4 sw=4 expandtab: */

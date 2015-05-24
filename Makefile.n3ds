@@ -60,6 +60,7 @@ OBJS= src/SDL.o \
       src/thread/3ds/SDL_systhread.o \
       src/thread/3ds/SDL_sysmutex.o \
       src/thread/3ds/SDL_syscond.o \
+      src/thread/3ds/SDL_systls.o \
       src/timer/SDL_timer.o \
       src/timer/3ds/SDL_systimer.o \
       src/video/SDL_RLEaccel.o \
@@ -93,7 +94,7 @@ ARCH		:=	-march=armv6k -mtune=mpcore -mfloat-abi=hard
 CFLAGS		:=	-g -Wall -O2 -mword-relocations -fno-short-enums \
 			-fomit-frame-pointer -ffast-math \
 			$(ARCH)
-CFLAGS		+=	$(INCLUDES) -DARM11 -D_3DS -D__3DS__
+CFLAGS		+=	$(INCLUDES) -DARM11 -D_3DS -D__3DS__ -DSDL_BUILDING_3DS
 CXXFLAGS	:=      $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 ASFLAGS		:=	-g $(ARCH)
 LDFLAGS		:=	-specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
