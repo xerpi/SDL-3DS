@@ -25,19 +25,7 @@
 #include "SDL_hints.h"
 #include "../SDL_sysrender.h"
 #include <3ds.h>
-/*
-#include <pspkernel.h>
-#include <pspdisplay.h>
-#include <pspgu.h>
-#include <pspgum.h>
-#include <stdio.h>
-#include <string.h>
-#include <math.h>
-#include <pspge.h>
-#include <stdarg.h>
-#include <stdlib.h>
-#include <vram.h>*/
-
+#include "shader_vsh_shbin.h"
 
 /* 3DS renderer implementation, based on the CTRULIB  */
 
@@ -117,7 +105,6 @@ SDL_RenderDriver N3DS_RenderDriver = {
 #define N3DS_TEMPPOOL_SIZE       0x80000
 //static unsigned int __attribute__((aligned(16))) DisplayList[262144];
 
-#define RGBA8(r, g, b, a) ((((r)&0xFF)<<24) | (((g)&0xFF)<<16) | (((b)&0xFF)<<8) | (((a)&0xFF)<<0))
 #define COL5650(r,g,b,a)    ((r>>3) | ((g>>2)<<5) | ((b>>3)<<11))
 #define COL5551(r,g,b,a)    ((r>>3) | ((g>>3)<<5) | ((b>>3)<<10) | (a>0?0x7000:0))
 #define COL4444(r,g,b,a)    ((r>>4) | ((g>>4)<<4) | ((b>>4)<<8) | ((a>>4)<<12))
@@ -137,6 +124,14 @@ typedef struct
 	void *pool_addr;
 	u32 pool_index;
 	u32 pool_size;
+	//Shader stuff
+	DVLB_s *dvlb;
+	shaderProgram_s shader;
+	u32 projection_desc;
+	//Matrix
+	float ortho_matrix_top[4*4];
+	float ortho_matrix_bot[4*4];
+
 
 
 	void*           frontbuffer;
@@ -168,18 +163,35 @@ typedef struct
 
 } N3DS_TextureData;
 
-typedef struct
-{
-    float   x, y, z;
-} VertV;
 
+typedef struct {
+	float u;
+	float v;
+} vector_2f;
 
-typedef struct
-{
-    float   u, v;
-    float   x, y, z;
+typedef struct {
+	float x;
+	float y;
+	float z;
+} vector_3f;
 
-} VertTV;
+typedef struct {
+	float r;
+	float g;
+	float b;
+	float a;
+} vector_4f;
+
+typedef struct {
+	vector_3f position;
+	vector_4f color;
+} vertex_pos_col;
+
+typedef struct {
+	vector_3f position;
+	vector_2f texcoord;
+} vertex_pos_tex;
+
 
 //stolen from staplebutt
 static void GPU_SetDummyTexEnv(u8 num)
@@ -224,6 +236,17 @@ void N3DS_pool_reset(N3DS_RenderData *data)
 {
 	data->pool_index = 0;
 }
+
+static void vector_mult_matrix4x4(const float *msrc, const vector_3f *vsrc, vector_3f *vdst);
+static void matrix_gpu_set_uniform(const float *m, u32 startreg);
+static void matrix_copy(float *dst, const float *src);
+static void matrix_identity4x4(float *m);
+static void matrix_mult4x4(const float *src1, const float *src2, float *dst);
+static void matrix_set_z_rotation(float *m, float rad);
+static void matrix_rotate_z(float *m, float rad);
+static void matrix_set_scaling(float *m, float x_scale, float y_scale, float z_scale);
+static void matrix_swap_xy(float *m);
+static void matrix_init_orthographic(float *m, float left, float right, float bottom, float top, float near, float far);
 
 /* Return next power of 2 */
 static int
@@ -285,113 +308,55 @@ StartDrawing(SDL_Renderer * renderer)
 }
 
 
+// Grabbed from Citra Emulator (citra/src/video_core/utils.h)
+static inline u32 morton_interleave(u32 x, u32 y)
+{
+	u32 i = (x & 7) | ((y & 7) << 8); // ---- -210
+	i = (i ^ (i << 2)) & 0x1313;      // ---2 --10
+	i = (i ^ (i << 1)) & 0x1515;      // ---2 -1-0
+	i = (i | (i >> 7)) & 0x3F;
+	return i;
+}
+
+//Grabbed from Citra Emulator (citra/src/video_core/utils.h)
+static inline u32 get_morton_offset(u32 x, u32 y, u32 bytes_per_pixel)
+{
+    u32 i = morton_interleave(x, y);
+    unsigned int offset = (x & ~7) * 8;
+    return (i + offset) * bytes_per_pixel;
+}
+
 int
 TextureSwizzle(N3DS_TextureData *n3ds_texture)
 {
-    if(n3ds_texture->swizzled)
-        return 1;
+	if(n3ds_texture->swizzled)
+		return 1;
 
-    int bytewidth = n3ds_texture->textureWidth*(n3ds_texture->bits>>3);
-    int height = n3ds_texture->size / bytewidth;
+	// TODO: add support for non-RGBA8 textures
+	u8 *data = linearAlloc(n3ds_texture->textureWidth * n3ds_texture->textureHeight * 4);
 
-    int rowblocks = (bytewidth>>4);
-    int rowblocksadd = (rowblocks-1)<<7;
-    unsigned int blockaddress = 0;
-    unsigned int *src = (unsigned int*) n3ds_texture->data;
+	int i, j;
+	for (j = 0; j < n3ds_texture->textureHeight; j++) {
+		for (i = 0; i < n3ds_texture->textureWidth; i++) {
+			u32 coarse_y = j & ~7;
+			u32 dst_offset = get_morton_offset(i, j, 4) + coarse_y * n3ds_texture->textureWidth * 4;
+			u32 v = ((u32 *)n3ds_texture->data)[i + (n3ds_texture->textureHeight - 1 - j)*n3ds_texture->textureWidth];
+			*(u32 *)(data + dst_offset) = v;
+		}
+	}
 
-    unsigned char *data = NULL;
-    data = malloc(n3ds_texture->size);
+	linearFree(n3ds_texture->data);
+	n3ds_texture->data = data;
+	n3ds_texture->swizzled = SDL_TRUE;
 
-    int j;
-
-    for(j = 0; j < height; j++, blockaddress += 16)
-    {
-        unsigned int *block;
-
-        block = (unsigned int*)&data[blockaddress];
-
-        int i;
-
-        for(i = 0; i < rowblocks; i++)
-        {
-            *block++ = *src++;
-            *block++ = *src++;
-            *block++ = *src++;
-            *block++ = *src++;
-            block += 28;
-        }
-
-        if((j & 0x7) == 0x7)
-            blockaddress += rowblocksadd;
-    }
-
-    free(n3ds_texture->data);
-    n3ds_texture->data = data;
-    n3ds_texture->swizzled = SDL_TRUE;
-
-    return 1;
+	return 1;
 }
 int TextureUnswizzle(N3DS_TextureData *n3ds_texture)
 {
     if(!n3ds_texture->swizzled)
         return 1;
 
-    int blockx, blocky;
-
-    int bytewidth = n3ds_texture->textureWidth*(n3ds_texture->bits>>3);
-    int height = n3ds_texture->size / bytewidth;
-
-    int widthblocks = bytewidth/16;
-    int heightblocks = height/8;
-
-    int dstpitch = (bytewidth - 16)/4;
-    int dstrow = bytewidth * 8;
-
-    unsigned int *src = (unsigned int*) n3ds_texture->data;
-
-    unsigned char *data = NULL;
-
-    data = malloc(n3ds_texture->size);
-
-    if(!data)
-        return 0;
-
-    //sceKernelDcacheWritebackAll();
-
-    int j;
-
-    unsigned char *ydst = (unsigned char *)data;
-
-    for(blocky = 0; blocky < heightblocks; ++blocky)
-    {
-        unsigned char *xdst = ydst;
-
-        for(blockx = 0; blockx < widthblocks; ++blockx)
-        {
-            unsigned int *block;
-
-            block = (unsigned int*)xdst;
-
-            for(j = 0; j < 8; ++j)
-            {
-                *(block++) = *(src++);
-                *(block++) = *(src++);
-                *(block++) = *(src++);
-                *(block++) = *(src++);
-                block += dstpitch;
-            }
-
-            xdst += 16;
-        }
-
-        ydst += dstrow;
-    }
-
-    free(n3ds_texture->data);
-
-    n3ds_texture->data = data;
-
-    n3ds_texture->swizzled = SDL_FALSE;
+    //n3ds_texture->swizzled = SDL_FALSE;
 
     return 1;
 }
@@ -467,8 +432,8 @@ N3DS_CreateRenderer(SDL_Window * window, Uint32 flags)
 		break;
 	}
 
-	data->gpu_fb_addr       = vramMemAlign(400*240*4*2, 0x100);
-	data->gpu_depth_fb_addr = vramMemAlign(400*240*4*2, 0x100);
+	data->gpu_fb_addr       = vramMemAlign(400*240*4, 0x100);
+	data->gpu_depth_fb_addr = vramMemAlign(400*240*2, 0x100);
 	data->gpu_cmd           = linearAlloc(N3DS_GPU_FIFO_SIZE);
 	data->pool_addr         = linearAlloc(N3DS_TEMPPOOL_SIZE);
 	data->pool_size         = N3DS_TEMPPOOL_SIZE;
@@ -479,18 +444,18 @@ N3DS_CreateRenderer(SDL_Window * window, Uint32 flags)
 	GPU_Reset(NULL, data->gpu_cmd, N3DS_GPU_FIFO_SIZE);
 
 	//Setup the shader
-	//data->dvlb = DVLB_ParseFile((u32 *)shader_vsh_shbin, shader_vsh_shbin_size);
-	//shaderProgramInit(&data->shader);
-	//shaderProgramSetVsh(&data->shader, &dvlb->DVLE[0]);
+	data->dvlb = DVLB_ParseFile((u32 *)shader_vsh_shbin, shader_vsh_shbin_size);
+	shaderProgramInit(&data->shader);
+	shaderProgramSetVsh(&data->shader, &data->dvlb->DVLE[0]);
 
 	//Get shader uniform descriptors
-	//data->projection_desc = shaderInstanceGetUniformLocation(data->shader.vertexShader, "projection");
+	data->projection_desc = shaderInstanceGetUniformLocation(data->shader.vertexShader, "projection");
 
-	//shaderProgramUse(&data->shader);
+	shaderProgramUse(&data->shader);
 
-	//matrix_init_orthographic(data->ortho_matrix_top, 0.0f, 400.0f, 0.0f, 240.0f, 0.0f, 1.0f);
-	//matrix_init_orthographic(data->ortho_matrix_bot, 0.0f, 320.0f, 0.0f, 240.0f, 0.0f, 1.0f);
-	//matrix_gpu_set_uniform(data->ortho_matrix_top, data->projection_desc);
+	matrix_init_orthographic(data->ortho_matrix_top, 0.0f, 400.0f, 0.0f, 240.0f, 0.0f, 1.0f);
+	matrix_init_orthographic(data->ortho_matrix_bot, 0.0f, 320.0f, 0.0f, 240.0f, 0.0f, 1.0f);
+	matrix_gpu_set_uniform(data->ortho_matrix_top, data->projection_desc);
 
 	GPU_SetViewport((u32 *)osConvertVirtToPhys((u32)data->gpu_depth_fb_addr),
 		(u32 *)osConvertVirtToPhys((u32)data->gpu_fb_addr),
@@ -573,7 +538,7 @@ N3DS_CreateTexture(SDL_Renderer * renderer, SDL_Texture * texture)
 
     n3ds_texture->pitch = n3ds_texture->textureWidth * SDL_BYTESPERPIXEL(texture->format);
     n3ds_texture->size = n3ds_texture->textureHeight*n3ds_texture->pitch;
-    n3ds_texture->data = SDL_calloc(1, n3ds_texture->size);
+    n3ds_texture->data = linearAlloc(n3ds_texture->size);
 
     if(!n3ds_texture->data)
     {
@@ -589,22 +554,40 @@ N3DS_CreateTexture(SDL_Renderer * renderer, SDL_Texture * texture)
 void
 TextureActivate(SDL_Texture * texture)
 {
-    N3DS_TextureData *n3ds_texture = (N3DS_TextureData *) texture->driverdata;
-    int scaleMode = GetScaleQuality();
+	N3DS_TextureData *n3ds_texture = (N3DS_TextureData *) texture->driverdata;
+	int scaleMode = GetScaleQuality();
 
-    /* Swizzling is useless with small textures. */
-    if (texture->w >= 16 || texture->h >= 16)
-    {
-        TextureSwizzle(n3ds_texture);
-    }
+	/* We must swizzle (Z-order) textures on the 3DS */
+	TextureSwizzle(n3ds_texture);
 
-    //sceGuEnable(GU_TEXTURE_2D);
-    //sceGuTexWrap(GU_REPEAT, GU_REPEAT);
-    //sceGuTexMode(n3ds_texture->format, 0, 0, n3ds_texture->swizzled);
-    //sceGuTexFilter(scaleMode, scaleMode); /* GU_NEAREST good for tile-map */
-                                          /* GU_LINEAR good for scaling */
-    //sceGuTexImage(0, n3ds_texture->textureWidth, n3ds_texture->textureHeight, n3ds_texture->textureWidth, n3ds_texture->data);
-    //sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
+	GPU_SetTextureEnable(GPU_TEXUNIT0);
+
+	GPU_SetTexEnv(
+		0,
+		GPU_TEVSOURCES(GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0),
+		GPU_TEVSOURCES(GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0),
+		GPU_TEVOPERANDS(0, 0, 0),
+		GPU_TEVOPERANDS(0, 0, 0),
+		GPU_REPLACE, GPU_REPLACE,
+		0xFFFFFFFF
+	);
+
+	GPU_SetTexture(
+		GPU_TEXUNIT0,
+		(u32 *)osConvertVirtToPhys((u32)n3ds_texture->data),
+		n3ds_texture->textureWidth,
+		n3ds_texture->textureHeight,
+		GPU_TEXTURE_MAG_FILTER(GPU_NEAREST) | GPU_TEXTURE_MIN_FILTER(GPU_NEAREST),
+		n3ds_texture->format
+	);
+
+	//sceGuEnable(GU_TEXTURE_2D);
+	//sceGuTexWrap(GU_REPEAT, GU_REPEAT);
+	//sceGuTexMode(n3ds_texture->format, 0, 0, n3ds_texture->swizzled);
+	//sceGuTexFilter(scaleMode, scaleMode); /* GU_NEAREST good for tile-map */
+				  /* GU_LINEAR good for scaling */
+	//sceGuTexImage(0, n3ds_texture->textureWidth, n3ds_texture->textureHeight, n3ds_texture->textureWidth, n3ds_texture->data);
+	//sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
 }
 
 
@@ -716,7 +699,7 @@ N3DS_RenderClear(SDL_Renderer *renderer)
 	StartDrawing(renderer);
 
 	//Clear the screen
-	u32 color = RGBA8(renderer->r, renderer->g, renderer->b, renderer->a);
+	u32 color = COL8888(renderer->r, renderer->g, renderer->b, renderer->a);
 
 	GX_SetMemoryFill(NULL, data->gpu_fb_addr, color, &data->gpu_fb_addr[0x2EE00],
 		0x201, data->gpu_depth_fb_addr, 0x00000000, &data->gpu_depth_fb_addr[0x2EE00], 0x201);
@@ -732,14 +715,14 @@ N3DS_RenderDrawPoints(SDL_Renderer * renderer, const SDL_FPoint * points,
     N3DS_RenderData *data = (N3DS_RenderData *)renderer->driverdata;
     int color = renderer->a << 24 | renderer->b << 16 | renderer->g << 8 | renderer->r;
     int i;
-    StartDrawing(renderer);
-    VertV* vertices = (VertV*)N3DS_pool_malloc(data, count*sizeof(VertV));
+    /*StartDrawing(renderer);
+    vector_3f* vertices = (vector_3f*)N3DS_pool_malloc(data, count*sizeof(vector_3f));
 
     for (i = 0; i < count; ++i) {
-            vertices[i].x = points[i].x;
-            vertices[i].y = points[i].y;
-            vertices[i].z = 0.0f;
-    }
+            vertices[i].position.x = points[i].position.x;
+            vertices[i].position.y = points[i].position.y;
+            vertices[i].position.z = 0.0f;
+    }*/
     //sceGuDisable(GU_TEXTURE_2D);
     //sceGuColor(color);
     //sceGuShadeModel(GU_FLAT);
@@ -757,14 +740,14 @@ N3DS_RenderDrawLines(SDL_Renderer * renderer, const SDL_FPoint * points,
     N3DS_RenderData *data = (N3DS_RenderData *)renderer->driverdata;
     int color = renderer->a << 24 | renderer->b << 16 | renderer->g << 8 | renderer->r;
     int i;
-    StartDrawing(renderer);
-    VertV* vertices = (VertV*)N3DS_pool_malloc(data, count*sizeof(VertV));
+    /*StartDrawing(renderer);
+    vector_3f* vertices = (vector_3f*)N3DS_pool_malloc(data, count*sizeof(vector_3f));
 
     for (i = 0; i < count; ++i) {
-            vertices[i].x = points[i].x;
-            vertices[i].y = points[i].y;
-            vertices[i].z = 0.0f;
-    }
+            vertices[i].position.x = points[i].position.x;
+            vertices[i].position.y = points[i].position.y;
+            vertices[i].position.z = 0.0f;
+    }*/
 
     //sceGuDisable(GU_TEXTURE_2D);
     //sceGuColor(color);
@@ -780,29 +763,48 @@ static int
 N3DS_RenderFillRects(SDL_Renderer * renderer, const SDL_FRect * rects,
                      int count)
 {
-    N3DS_RenderData *data = (N3DS_RenderData *) renderer->driverdata;
-    int color = renderer->a << 24 | renderer->b << 16 | renderer->g << 8 | renderer->r;
-    int i;
-    StartDrawing(renderer);
+	N3DS_RenderData *data = (N3DS_RenderData *) renderer->driverdata;
+	int i;
+	//StartDrawing(renderer);
 
-    for (i = 0; i < count; ++i) {
-        const SDL_FRect *rect = &rects[i];
-        VertV* vertices = (VertV*)N3DS_pool_malloc(data, (sizeof(VertV)<<1));
-        vertices[0].x = rect->x;
-        vertices[0].y = rect->y;
-        vertices[0].z = 0.0f;
+	for (i = 0; i < count; ++i) {
+		const SDL_FRect *rect = &rects[i];
+		vertex_pos_col *vertices = (vertex_pos_col*)N3DS_pool_malloc(data, (sizeof(vertex_pos_col)*4));
 
-        vertices[1].x = rect->x + rect->w;
-        vertices[1].y = rect->y + rect->h;
-        vertices[1].z = 0.0f;
+		vertices[0].position = (vector_3f){(float)rect->x,         (float)rect->y,         0.0f};
+		vertices[1].position = (vector_3f){(float)rect->x+rect->w, (float)rect->y,         0.0f};
+		vertices[2].position = (vector_3f){(float)rect->x,         (float)rect->y+rect->h, 0.0f};
+		vertices[3].position = (vector_3f){(float)rect->x+rect->w, (float)rect->y+rect->h, 0.0f};
 
-        //sceGuDisable(GU_TEXTURE_2D);
-        //sceGuColor(color);
-        //sceGuShadeModel(GU_FLAT);
-        //sceGuDrawArray(GU_SPRITES, GU_VERTEX_32BITF|GU_TRANSFORM_2D, 2, 0, vertices);
-        //sceGuShadeModel(GU_SMOOTH);
-        //sceGuEnable(GU_TEXTURE_2D);
-    }
+		vertices[0].color = (vector_4f){renderer->r/255.0f,  renderer->g/255.0f, renderer->b/255.0f, renderer->a/255.0f};
+		vertices[1].color = vertices[0].color;
+		vertices[2].color = vertices[0].color;
+		vertices[3].color = vertices[0].color;
+
+		GPU_SetTexEnv(
+			0,
+			GPU_TEVSOURCES(GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR),
+			GPU_TEVSOURCES(GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR),
+			GPU_TEVOPERANDS(0, 0, 0),
+			GPU_TEVOPERANDS(0, 0, 0),
+			GPU_REPLACE, GPU_REPLACE,
+			0xFFFFFFFF
+		);
+
+		GPU_SetAttributeBuffers(
+			2, // number of attributes
+			(u32*)osConvertVirtToPhys((u32)vertices),
+			GPU_ATTRIBFMT(0, 3, GPU_FLOAT) | GPU_ATTRIBFMT(1, 4, GPU_FLOAT),
+			0xFFFC, //0b1100
+			0x10,
+			1, //number of buffers
+			(u32[]){0x0}, // buffer offsets (placeholders)
+			(u64[]){0x10}, // attribute permutations for each buffer
+			(u8[]){2} // number of attributes for each buffer
+		);
+
+		GPU_DrawArray(GPU_TRIANGLE_STRIP, 4);
+	}
 
     return 0;
 }
@@ -852,95 +854,68 @@ static int
 N3DS_RenderCopy(SDL_Renderer * renderer, SDL_Texture * texture,
                 const SDL_Rect * srcrect, const SDL_FRect * dstrect)
 {
-    N3DS_RenderData *data = (N3DS_RenderData *) renderer->driverdata;
-    float x, y, width, height;
-    float u0, v0, u1, v1;
-    unsigned char alpha;
+	N3DS_RenderData *data = (N3DS_RenderData *) renderer->driverdata;
+	N3DS_TextureData *n3ds_texture = (N3DS_TextureData *) texture->driverdata;
+	float x, y, width, height;
+	float u0, v0, u1, v1;
+	unsigned char alpha;
 
-    x = dstrect->x;
-    y = dstrect->y;
-    width = dstrect->w;
-    height = dstrect->h;
+	x = dstrect->x;
+	y = dstrect->y;
+	width = dstrect->w;
+	height = dstrect->h;
 
-    u0 = srcrect->x;
-    v0 = srcrect->y;
-    u1 = srcrect->x + srcrect->w;
-    v1 = srcrect->y + srcrect->h;
+	u0 = (srcrect->x)/n3ds_texture->textureWidth;
+	v0 = (srcrect->y)/n3ds_texture->textureHeight;
+	u1 = (srcrect->x + srcrect->w)/n3ds_texture->textureWidth;
+	v1 = (srcrect->y + srcrect->h)/n3ds_texture->textureHeight;
 
-    alpha = texture->a;
+	alpha = texture->a;
 
-    StartDrawing(renderer);
-    TextureActivate(texture);
-    N3DS_SetBlendMode(renderer, renderer->blendMode);
+	//StartDrawing(renderer);
+	TextureActivate(texture);
+	N3DS_SetBlendMode(renderer, renderer->blendMode);
 
-    if(alpha != 255)
-    {
-        //sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
-        //sceGuColor(GU_RGBA(255, 255, 255, alpha));
-    }else{
-        //sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
-        //sceGuColor(0xFFFFFFFF);
-    }
+	if (alpha != 255) {
+		//sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+		//sceGuColor(GU_RGBA(255, 255, 255, alpha));
+	} else {
+		//sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
+		//sceGuColor(0xFFFFFFFF);
+	}
 
-    if((MathAbs(u1) - MathAbs(u0)) < 64.0f)
-    {
-        VertTV* vertices = (VertTV*)N3DS_pool_malloc(data, (sizeof(VertTV))<<1);
+	vertex_pos_tex* vertices = (vertex_pos_tex*)N3DS_pool_malloc(data, (sizeof(vertex_pos_tex))*4);
 
-        vertices[0].u = u0;
-        vertices[0].v = v0;
-        vertices[0].x = x;
-        vertices[0].y = y;
-        vertices[0].z = 0;
+	vertices[0].position = (vector_3f){(float)x,       (float)y,        0.0f};
+	vertices[1].position = (vector_3f){(float)x+width, (float)y,        0.0f};
+	vertices[2].position = (vector_3f){(float)x,       (float)y+height, 0.0f};
+	vertices[3].position = (vector_3f){(float)x+width, (float)y+height, 0.0f};
 
-        vertices[1].u = u1;
-        vertices[1].v = v1;
-        vertices[1].x = x + width;
-        vertices[1].y = y + height;
-        vertices[1].z = 0;
+	//float u = texture->width/(float)texture->textureWidth;
+	//float v = texture->height/(float)texture->textureHeight;
 
-        //sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF|GU_VERTEX_32BITF|GU_TRANSFORM_2D, 2, 0, vertices);
-    }
-    else
-    {
-        float start, end;
-        float curU = u0;
-        float curX = x;
-        float endX = x + width;
-        float slice = 64.0f;
-        float ustep = (u1 - u0)/width * slice;
+	vertices[0].texcoord = (vector_2f){u0, v0};
+	vertices[1].texcoord = (vector_2f){u1, v0};
+	vertices[2].texcoord = (vector_2f){u0, v1};
+	vertices[3].texcoord = (vector_2f){u1, v1};
 
-        if(ustep < 0.0f)
-            ustep = -ustep;
+	GPU_SetAttributeBuffers(
+		2, // number of attributes
+		(u32*)osConvertVirtToPhys((u32)vertices),
+		GPU_ATTRIBFMT(0, 3, GPU_FLOAT) | GPU_ATTRIBFMT(1, 4, GPU_FLOAT),
+		0xFFFC, //0b1100
+		0x10,
+		1, //number of buffers
+		(u32[]){0x0}, // buffer offsets (placeholders)
+		(u64[]){0x10}, // attribute permutations for each buffer
+		(u8[]){2} // number of attributes for each buffer
+	);
 
-        for(start = 0, end = width; start < end; start += slice)
-        {
-            VertTV* vertices = (VertTV*)N3DS_pool_malloc(data, (sizeof(VertTV))<<1);
+	GPU_DrawArray(GPU_TRIANGLE_STRIP, 4);
 
-            float polyWidth = ((curX + slice) > endX) ? (endX - curX) : slice;
-            float sourceWidth = ((curU + ustep) > u1) ? (u1 - curU) : ustep;
-
-            vertices[0].u = curU;
-            vertices[0].v = v0;
-            vertices[0].x = curX;
-            vertices[0].y = y;
-            vertices[0].z = 0;
-
-            curU += sourceWidth;
-            curX += polyWidth;
-
-            vertices[1].u = curU;
-            vertices[1].v = v1;
-            vertices[1].x = curX;
-            vertices[1].y = (y + height);
-            vertices[1].z = 0;
-
-            //sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF|GU_VERTEX_32BITF|GU_TRANSFORM_2D, 2, 0, vertices);
-        }
-    }
-
-    //if(alpha != 255) 3DS STUB
-        //sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
-    return 0;
+	//if(alpha != 255) 3DS STUB
+	//sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
+	return 0;
 }
 
 static int
@@ -957,99 +932,112 @@ N3DS_RenderCopyEx(SDL_Renderer * renderer, SDL_Texture * texture,
                 const SDL_Rect * srcrect, const SDL_FRect * dstrect,
                 const double angle, const SDL_FPoint *center, const SDL_RendererFlip flip)
 {
-    N3DS_RenderData *data = (N3DS_RenderData *) renderer->driverdata;
-    float x, y, width, height;
-    float u0, v0, u1, v1;
-    unsigned char alpha;
-    float centerx, centery;
+	N3DS_RenderData *data = (N3DS_RenderData *) renderer->driverdata;
+	N3DS_TextureData *n3ds_texture = (N3DS_TextureData *) texture->driverdata;
+	float x, y, width, height;
+	float u0, v0, u1, v1;
+	unsigned char alpha;
+	float centerx, centery;
 
-    x = dstrect->x;
-    y = dstrect->y;
-    width = dstrect->w;
-    height = dstrect->h;
+	x = dstrect->x;
+	y = dstrect->y;
+	width = dstrect->w;
+	height = dstrect->h;
 
-    u0 = srcrect->x;
-    v0 = srcrect->y;
-    u1 = srcrect->x + srcrect->w;
-    v1 = srcrect->y + srcrect->h;
-
-    centerx = center->x;
-    centery = center->y;
-
-    alpha = texture->a;
-
-    StartDrawing(renderer);
-    TextureActivate(texture);
-    N3DS_SetBlendMode(renderer, renderer->blendMode);
-
-    if(alpha != 255)
-    {
-        //sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
-        //sceGuColor(GU_RGBA(255, 255, 255, alpha));
-    }else{
-        //sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
-        //sceGuColor(0xFFFFFFFF);
-    }
-
-/*      x += width * 0.5f; */
-/*      y += height * 0.5f; */
-    x += centerx;
-    y += centery;
-
-    float c, s;
-
-    MathSincos(degToRad(angle), &s, &c);
-
-/*      width *= 0.5f; */
-/*      height *= 0.5f; */
-    width  -= centerx;
-    height -= centery;
+	u0 = (srcrect->x)/n3ds_texture->textureWidth;
+	v0 = (srcrect->y)/n3ds_texture->textureHeight;
+	u1 = (srcrect->x + srcrect->w)/n3ds_texture->textureWidth;
+	v1 = (srcrect->y + srcrect->h)/n3ds_texture->textureHeight;
 
 
-    float cw = c*width;
-    float sw = s*width;
-    float ch = c*height;
-    float sh = s*height;
+	centerx = center->x;
+	centery = center->y;
 
-    VertTV* vertices = (VertTV*)N3DS_pool_malloc(data, sizeof(VertTV)<<2);
+	alpha = texture->a;
 
-    vertices[0].u = u0;
-    vertices[0].v = v0;
-    vertices[0].x = x - cw + sh;
-    vertices[0].y = y - sw - ch;
-    vertices[0].z = 0;
+	//StartDrawing(renderer);
+	TextureActivate(texture);
+	N3DS_SetBlendMode(renderer, renderer->blendMode);
 
-    vertices[1].u = u0;
-    vertices[1].v = v1;
-    vertices[1].x = x - cw - sh;
-    vertices[1].y = y - sw + ch;
-    vertices[1].z = 0;
+	if (alpha != 255) {
+		//sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+		//sceGuColor(GU_RGBA(255, 255, 255, alpha));
+	} else {
+		//sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
+		//sceGuColor(0xFFFFFFFF);
+	}
 
-    vertices[2].u = u1;
-    vertices[2].v = v1;
-    vertices[2].x = x + cw - sh;
-    vertices[2].y = y + sw + ch;
-    vertices[2].z = 0;
+	/*      x += width * 0.5f; */
+	/*      y += height * 0.5f; */
+	x += centerx;
+	y += centery;
 
-    vertices[3].u = u1;
-    vertices[3].v = v0;
-    vertices[3].x = x + cw + sh;
-    vertices[3].y = y + sw - ch;
-    vertices[3].z = 0;
+	float c, s;
 
-    if (flip & SDL_FLIP_HORIZONTAL) {
-                Swap(&vertices[0].v, &vertices[2].v);
-                Swap(&vertices[1].v, &vertices[3].v);
-    }
-    if (flip & SDL_FLIP_VERTICAL) {
-                Swap(&vertices[0].u, &vertices[2].u);
-                Swap(&vertices[1].u, &vertices[3].u);
-    }
+	MathSincos(degToRad(angle), &s, &c);
 
-    //sceGuDrawArray(GU_TRIANGLE_FAN, GU_TEXTURE_32BITF|GU_VERTEX_32BITF|GU_TRANSFORM_2D, 4, 0, vertices);
+	/*      width *= 0.5f; */
+	/*      height *= 0.5f; */
+	width  -= centerx;
+	height -= centery;
 
-    //if(alpha != 255)  3DS STUB
-        //sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
+
+	float cw = c*width;
+	float sw = s*width;
+	float ch = c*height;
+	float sh = s*height;
+
+	vertex_pos_tex* vertices = (vertex_pos_tex*)N3DS_pool_malloc(data, sizeof(vertex_pos_tex)<<2);
+
+	vertices[0].texcoord.u = u0;
+	vertices[0].texcoord.v = v0;
+	vertices[0].position.x = x - cw + sh;
+	vertices[0].position.y = y - sw - ch;
+	vertices[0].position.z = 0;
+
+	vertices[1].texcoord.u = u0;
+	vertices[1].texcoord.v = v1;
+	vertices[1].position.x = x - cw - sh;
+	vertices[1].position.y = y - sw + ch;
+	vertices[1].position.z = 0;
+
+	vertices[2].texcoord.u = u1;
+	vertices[2].texcoord.v = v1;
+	vertices[2].position.x = x + cw - sh;
+	vertices[2].position.y = y + sw + ch;
+	vertices[2].position.z = 0;
+
+	vertices[3].texcoord.u = u1;
+	vertices[3].texcoord.v = v0;
+	vertices[3].position.x = x + cw + sh;
+	vertices[3].position.y = y + sw - ch;
+	vertices[3].position.z = 0;
+
+	if (flip & SDL_FLIP_HORIZONTAL) {
+		Swap(&vertices[0].texcoord.v, &vertices[2].texcoord.v);
+		Swap(&vertices[1].texcoord.v, &vertices[3].texcoord.v);
+	}
+	if (flip & SDL_FLIP_VERTICAL) {
+		Swap(&vertices[0].texcoord.u, &vertices[2].texcoord.u);
+		Swap(&vertices[1].texcoord.u, &vertices[3].texcoord.u);
+	}
+
+	GPU_SetAttributeBuffers(
+		2, // number of attributes
+		(u32*)osConvertVirtToPhys((u32)vertices),
+		GPU_ATTRIBFMT(0, 3, GPU_FLOAT) | GPU_ATTRIBFMT(1, 4, GPU_FLOAT),
+		0xFFFC, //0b1100
+		0x10,
+		1, //number of buffers
+		(u32[]){0x0}, // buffer offsets (placeholders)
+		(u64[]){0x10}, // attribute permutations for each buffer
+		(u8[]){2} // number of attributes for each buffer
+	);
+
+	GPU_DrawArray(GPU_TRIANGLE_STRIP, 4);
+
+	//if(alpha != 255)  3DS STUB
+		//sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
     return 0;
 }
 
@@ -1089,18 +1077,20 @@ N3DS_RenderPresent(SDL_Renderer * renderer)
 static void
 N3DS_DestroyTexture(SDL_Renderer * renderer, SDL_Texture * texture)
 {
-    N3DS_RenderData *renderdata = (N3DS_RenderData *) renderer->driverdata;
-    N3DS_TextureData *n3ds_texture = (N3DS_TextureData *) texture->driverdata;
+	N3DS_RenderData *renderdata = (N3DS_RenderData *) renderer->driverdata;
+	N3DS_TextureData *n3ds_texture = (N3DS_TextureData *) texture->driverdata;
 
-    if (renderdata == 0)
-        return;
+	if (renderdata == 0)
+		return;
 
-    if(n3ds_texture == 0)
-        return;
+	if(n3ds_texture == 0)
+		return;
 
-    SDL_free(n3ds_texture->data);
-    SDL_free(n3ds_texture);
-    texture->driverdata = NULL;
+	// Texture Data allocated in the Linear Heap
+	linearFree(n3ds_texture->data);
+
+	SDL_free(n3ds_texture);
+	texture->driverdata = NULL;
 }
 
 static void
@@ -1111,11 +1101,11 @@ N3DS_DestroyRenderer(SDL_Renderer * renderer)
 		if (!data->initialized)
 			return;
 
-		StartDrawing(renderer);
+		//StartDrawing(renderer);
 
 		gfxExit();
-		//shaderProgramFree(&data->shader);
-		//DVLB_Free(data->dvlb);
+		shaderProgramFree(&data->shader);
+		DVLB_Free(data->dvlb);
 
 		linearFree(data->pool_addr);
 		linearFree(data->gpu_cmd);
@@ -1132,6 +1122,136 @@ N3DS_DestroyRenderer(SDL_Renderer * renderer)
 		SDL_free(data);
 	}
 	SDL_free(renderer);
+}
+
+
+/* Utils */
+
+void vector_mult_matrix4x4(const float *msrc, const vector_3f *vsrc, vector_3f *vdst)
+{
+	vdst->x = msrc[0*4 + 0]*vsrc->x + msrc[0*4 + 1]*vsrc->y + msrc[0*4 + 2]*vsrc->z + msrc[0*4 + 3];
+	vdst->y = msrc[1*4 + 0]*vsrc->x + msrc[1*4 + 1]*vsrc->y + msrc[1*4 + 2]*vsrc->z + msrc[1*4 + 3];
+	vdst->z = msrc[2*4 + 0]*vsrc->x + msrc[2*4 + 1]*vsrc->y + msrc[2*4 + 2]*vsrc->z + msrc[2*4 + 3];
+}
+
+void matrix_gpu_set_uniform(const float *m, u32 startreg)
+{
+	float mu[4*4];
+
+	int i, j;
+	for (i = 0; i < 4; i++) {
+		for (j = 0; j < 4; j++) {
+			mu[i*4 + j] = m[i*4 + (3-j)];
+		}
+	}
+
+	GPU_SetFloatUniform(GPU_VERTEX_SHADER, startreg, (u32 *)mu, 4);
+}
+
+void matrix_copy(float *dst, const float *src)
+{
+	memcpy(dst, src, sizeof(float)*4*4);
+}
+
+void matrix_identity4x4(float *m)
+{
+	m[0] = m[5] = m[10] = m[15] = 1.0f;
+	m[1] = m[2] = m[3] = 0.0f;
+	m[4] = m[6] = m[7] = 0.0f;
+	m[8] = m[9] = m[11] = 0.0f;
+	m[12] = m[13] = m[14] = 0.0f;
+}
+
+void matrix_mult4x4(const float *src1, const float *src2, float *dst)
+{
+	int i, j, k;
+	for (i = 0; i < 4; i++) {
+		for (j = 0; j < 4; j++) {
+			dst[i*4 + j] = 0.0f;
+			for (k = 0; k < 4; k++) {
+				dst[i*4 + j] += src1[i*4 + k]*src2[k*4 + j];
+			}
+		}
+	}
+}
+
+void matrix_set_z_rotation(float *m, float rad)
+{
+	float c = cosf(rad);
+	float s = sinf(rad);
+
+	matrix_identity4x4(m);
+
+	m[0] = c;
+	m[1] = -s;
+	m[4] = s;
+	m[5] = c;
+}
+
+void matrix_rotate_z(float *m, float rad)
+{
+	float mr[4*4], mt[4*4];
+	matrix_set_z_rotation(mr, rad);
+	matrix_mult4x4(mr, m, mt);
+	matrix_copy(m, mt);
+}
+
+void matrix_set_scaling(float *m, float x_scale, float y_scale, float z_scale)
+{
+	matrix_identity4x4(m);
+	m[0] = x_scale;
+	m[5] = y_scale;
+	m[10] = z_scale;
+}
+
+void matrix_swap_xy(float *m)
+{
+	float ms[4*4], mt[4*4];
+	matrix_identity4x4(ms);
+
+	ms[0] = 0.0f;
+	ms[1] = 1.0f;
+	ms[4] = 1.0f;
+	ms[5] = 0.0f;
+
+	matrix_mult4x4(ms, m, mt);
+	matrix_copy(m, mt);
+}
+
+void matrix_init_orthographic(float *m, float left, float right, float bottom, float top, float near, float far)
+{
+	float mo[4*4], mp[4*4];
+
+	mo[0x0] = 2.0f/(right-left);
+	mo[0x1] = 0.0f;
+	mo[0x2] = 0.0f;
+	mo[0x3] = -(right+left)/(right-left);
+
+	mo[0x4] = 0.0f;
+	mo[0x5] = 2.0f/(top-bottom);
+	mo[0x6] = 0.0f;
+	mo[0x7] = -(top+bottom)/(top-bottom);
+
+	mo[0x8] = 0.0f;
+	mo[0x9] = 0.0f;
+	mo[0xA] = -2.0f/(far-near);
+	mo[0xB] = (far+near)/(far-near);
+
+	mo[0xC] = 0.0f;
+	mo[0xD] = 0.0f;
+	mo[0xE] = 0.0f;
+	mo[0xF] = 1.0f;
+
+	matrix_identity4x4(mp);
+	mp[0xA] = 0.5;
+	mp[0xB] = -0.5;
+
+	//Convert Z [-1, 1] to [-1, 0] (PICA shiz)
+	matrix_mult4x4(mp, mo, m);
+	// Rotate 180 degrees
+	matrix_rotate_z(m, M_PI);
+	// Swap X and Y axis
+	matrix_swap_xy(m);
 }
 
 #endif /* SDL_VIDEO_RENDER_3DS */
