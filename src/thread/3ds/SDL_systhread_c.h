@@ -21,4 +21,9 @@
 
 #include <3ds.h>
 
-typedef Handle SYS_ThreadHandle;
+typedef struct {
+	Handle threadHandle;
+	u32 *threadStack;
+} N3DS_ThreadHandle;
+
+typedef N3DS_ThreadHandle SYS_ThreadHandle;

@@ -11,11 +11,11 @@
   freely, subject to the following restrictions:
 
   1. The origin of this software must not be misrepresented; you must not
-     claim that you wrote the original software. If you use this software
-     in a product, an acknowledgment in the product documentation would be
-     appreciated but is not required.
+	  claim that you wrote the original software. If you use this software
+	  in a product, an acknowledgment in the product documentation would be
+	  appreciated but is not required.
   2. Altered source versions must be plainly marked as such, and must not be
-     misrepresented as being the original software.
+	  misrepresented as being the original software.
   3. This notice may not be removed or altered from any source distribution.
 */
 #include "../../SDL_internal.h"
@@ -26,6 +26,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <malloc.h>
 
 #include "SDL_error.h"
 #include "SDL_thread.h"
@@ -33,79 +34,73 @@
 #include "../SDL_thread_c.h"
 #include <3ds.h>
 
+#define CURRENT_KTHREAD 0xFFFF8000
+#define STACKSIZE       (4 * 1024)
+#define APPCORE_CPUID   0
 
-static int ThreadEntry(int args, void *argp)
+static void ThreadEntry(void *arg)
 {
-    SDL_RunThread(*(void **) argp);
-    return 0;
+	SDL_RunThread(*(void **) arg);
+	svcExitThread();
 }
 
 int SDL_SYS_CreateThread(SDL_Thread *thread, void *args)
 {
-#if 0
-    SceKernelThreadInfo status;
-    int priority = 32;
+	s32 priority = 0x30;
 
-    /* Set priority of new thread to the same as the current thread */
-    status.size = sizeof(SceKernelThreadInfo);
-    if (sceKernelReferThreadStatus(sceKernelGetThreadId(), &status) == 0) {
-        priority = status.currentPriority;
-    }
+	/* Set priority of new thread to the same as the current thread */
+	//svcGetThreadPriority(&priority, CURRENT_KTHREAD);
 
-    thread->handle = sceKernelCreateThread("SDL thread", ThreadEntry,
-                           priority, 0x8000,
-                           PSP_THREAD_ATTR_VFPU, NULL);
-    if (thread->handle < 0) {
-        return SDL_SetError("sceKernelCreateThread() failed");
-    }
+	thread->handle.threadStack = memalign(32, STACKSIZE);
 
-    sceKernelStartThread(thread->handle, 4, &args);
-#endif
-    return 0;
+	Result res;
+	res = svcCreateThread(&thread->handle.threadHandle,
+		ThreadEntry, 0, &thread->handle.threadStack[STACKSIZE/4],
+		priority, APPCORE_CPUID);
+
+	if (res < 0) {
+		return SDL_SetError("svcCreateThread() failed");
+	}
+
+	return 0;
 }
 
 void SDL_SYS_SetupThread(const char *name)
 {
-    /* Do nothing. */
+	 /* Do nothing. */
 }
 
 SDL_threadID SDL_ThreadID(void)
 {
-   // return (SDL_threadID) sceKernelGetThreadId();
-   return (SDL_threadID)0;
+	// return (SDL_threadID) sceKernelGetThreadId();
+	return (SDL_threadID)0;
 }
 
 void SDL_SYS_WaitThread(SDL_Thread *thread)
 {
-    //sceKernelWaitThreadEnd(thread->handle, NULL);
-    //sceKernelDeleteThread(thread->handle);
+	svcWaitSynchronization(thread->handle.threadHandle, U64_MAX);
 }
 
 void SDL_SYS_DetachThread(SDL_Thread *thread)
 {
-    /* !!! FIXME: is this correct? */
-    //sceKernelDeleteThread(thread->handle);
-}
-
-void SDL_SYS_KillThread(SDL_Thread *thread)
-{
-    //sceKernelTerminateDeleteThread(thread->handle);
+	 /* !!! FIXME: is this correct? */
+	svcCloseHandle(thread->handle.threadHandle);
+	free(thread->handle.threadStack);
 }
 
 int SDL_SYS_SetThreadPriority(SDL_ThreadPriority priority)
 {
-/*    int value;
+	/*s32 value;
 
-    if (priority == SDL_THREAD_PRIORITY_LOW) {
-        value = 19;
-    } else if (priority == SDL_THREAD_PRIORITY_HIGH) {
-        value = -20;
-    } else {
-        value = 0;
-    }
+	if (priority == SDL_THREAD_PRIORITY_LOW) {
+		value = 0x5;
+	} else if (priority == SDL_THREAD_PRIORITY_HIGH) {
+		value = 0x3F;
+	} else {
+		value = 0x20;
+	}*/
 
-    return sceKernelChangeThreadPriority(sceKernelGetThreadId(),value);
-*/
+	//return sceKernelChangeThreadPriority(sceKernelGetThreadId(),value);
 	return 0;
 }
 

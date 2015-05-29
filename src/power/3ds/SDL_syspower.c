@@ -25,41 +25,38 @@
 #if SDL_POWER_3DS
 
 #include "SDL_power.h"
-//#include <psppower.h>
+#include <3ds.h>
 
 
 SDL_bool
 SDL_GetPowerInfo_3DS(SDL_PowerState * state, int *seconds,
                             int *percent)
 {
-    int battery = 0;//scePowerIsBatteryExist();
-    int plugged = 0;//scePowerIsPowerOnline();
-    int charging = 0;//scePowerIsBatteryCharging();
+	u8 batteryLevel = 0;
+	u8 charging = 0;
 
-    *state = SDL_POWERSTATE_UNKNOWN;
-    *seconds = -1;
-    *percent = -1;
+	PTMU_GetBatteryLevel(NULL, &batteryLevel);
+	PTMU_GetBatteryChargeState(NULL, &charging);
 
-    if (!battery) {
-        *state = SDL_POWERSTATE_NO_BATTERY;
-        *seconds = -1;
-        *percent = -1;
-    } else if (charging) {
-        *state = SDL_POWERSTATE_CHARGING;
-        //*percent = scePowerGetBatteryLifePercent();
-        //*seconds = scePowerGetBatteryLifeTime()*60;
-    } else if (plugged) {
-        *state = SDL_POWERSTATE_CHARGED;
-        //*percent = scePowerGetBatteryLifePercent();
-        //*seconds = scePowerGetBatteryLifeTime()*60;
-    } else {
-        *state = SDL_POWERSTATE_ON_BATTERY;
-        //*percent = scePowerGetBatteryLifePercent();
-        //*seconds = scePowerGetBatteryLifeTime()*60;
-    }
+	*state = SDL_POWERSTATE_UNKNOWN;
+	*seconds = -1;
+	*percent = -1;
 
+	if (charging) {
+		*state = SDL_POWERSTATE_CHARGING;
+		//*percent = scePowerGetBatteryLifePercent();
+		//*seconds = scePowerGetBatteryLifeTime()*60;
+	} else if (batteryLevel == 5) {
+		*state = SDL_POWERSTATE_CHARGED;
+		//*percent = scePowerGetBatteryLifePercent();
+		//*seconds = scePowerGetBatteryLifeTime()*60;
+	} else {
+		*state = SDL_POWERSTATE_ON_BATTERY;
+		//*percent = scePowerGetBatteryLifePercent();
+		//*seconds = scePowerGetBatteryLifeTime()*60;
+	}
 
-    return SDL_TRUE;            /* always the definitive answer on PSP. */
+    return SDL_TRUE;	/* always the definitive answer on 3DS. */
 }
 
 #endif /* SDL_POWER_3DS */
