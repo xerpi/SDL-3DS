@@ -464,7 +464,7 @@ N3DS_CreateRenderer(SDL_Window * window, Uint32 flags)
 	GPU_DepthMap(-1.0f, 0.0f);
 	GPU_SetFaceCulling(GPU_CULL_NONE);
 	GPU_SetStencilTest(false, GPU_ALWAYS, 0x00, 0xFF, 0x00);
-	GPU_SetStencilOp(GPU_KEEP, GPU_KEEP, GPU_KEEP);
+	GPU_SetStencilOp(GPU_STENCIL_KEEP, GPU_STENCIL_KEEP, GPU_STENCIL_KEEP);
 	GPU_SetBlendingColor(0,0,0,0);
 	GPU_SetDepthTestAndWriteMask(true, GPU_GEQUAL, GPU_WRITE_ALL);
 	GPUCMD_AddMaskedWrite(GPUREG_0062, 0x1, 0);
@@ -1257,4 +1257,3 @@ void matrix_init_orthographic(float *m, float left, float right, float bottom, f
 #endif /* SDL_VIDEO_RENDER_3DS */
 
 /* vi: set ts=4 sw=4 expandtab: */
-

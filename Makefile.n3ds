@@ -120,9 +120,10 @@ src/render/3ds/shader_vsh_shbin.h src/render/3ds/shader.vsh.o:
 	@rm src/render/3ds/shader.vsh.shbin
 
 install: $(TARGET_LIB)
-	@cp  $(TARGET_LIB) "$(DEVKITPRO)/portlibs/armv6k/lib"
-	@mkdir -p "$(DEVKITPRO)/portlibs/armv6k/include/SDL2"
-	@cp include/*.h "$(DEVKITPRO)/portlibs/armv6k/include/SDL2"
+	@mkdir -p "$(DEVKITPRO)/portlibs/3ds/lib"
+	@cp  $(TARGET_LIB) "$(DEVKITPRO)/portlibs/3ds/lib"
+	@mkdir -p "$(DEVKITPRO)/portlibs/3ds/include/SDL2"
+	@cp include/*.h "$(DEVKITPRO)/portlibs/3ds/include/SDL2"
 	@echo "Installed!"
 
 clean:
