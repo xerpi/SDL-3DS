@@ -803,7 +803,7 @@ N3DS_RenderFillRects(SDL_Renderer * renderer, const SDL_FRect * rects,
 			(u8[]){2} // number of attributes for each buffer
 		);
 
-		GPU_DrawArray(GPU_TRIANGLE_STRIP, 4);
+		GPU_DrawArray(GPU_TRIANGLE_STRIP, 0, 4);
 	}
 
     return 0;
@@ -911,7 +911,7 @@ N3DS_RenderCopy(SDL_Renderer * renderer, SDL_Texture * texture,
 		(u8[]){2} // number of attributes for each buffer
 	);
 
-	GPU_DrawArray(GPU_TRIANGLE_STRIP, 4);
+	GPU_DrawArray(GPU_TRIANGLE_STRIP, 0, 4);
 
 	//if(alpha != 255) 3DS STUB
 	//sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
@@ -1034,7 +1034,7 @@ N3DS_RenderCopyEx(SDL_Renderer * renderer, SDL_Texture * texture,
 		(u8[]){2} // number of attributes for each buffer
 	);
 
-	GPU_DrawArray(GPU_TRIANGLE_STRIP, 4);
+	GPU_DrawArray(GPU_TRIANGLE_STRIP, 0, 4);
 
 	//if(alpha != 255)  3DS STUB
 		//sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
