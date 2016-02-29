@@ -35,8 +35,8 @@ SDL_GetPowerInfo_3DS(SDL_PowerState * state, int *seconds,
 	u8 batteryLevel = 0;
 	u8 charging = 0;
 
-	PTMU_GetBatteryLevel(NULL, &batteryLevel);
-	PTMU_GetBatteryChargeState(NULL, &charging);
+	PTMU_GetBatteryLevel(&batteryLevel);
+	PTMU_GetBatteryChargeState(&charging);
 
 	*state = SDL_POWERSTATE_UNKNOWN;
 	*seconds = -1;
