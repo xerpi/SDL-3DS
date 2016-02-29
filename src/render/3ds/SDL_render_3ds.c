@@ -467,8 +467,8 @@ N3DS_CreateRenderer(SDL_Window * window, Uint32 flags)
 	GPU_SetStencilOp(GPU_STENCIL_KEEP, GPU_STENCIL_KEEP, GPU_STENCIL_KEEP);
 	GPU_SetBlendingColor(0,0,0,0);
 	GPU_SetDepthTestAndWriteMask(true, GPU_GEQUAL, GPU_WRITE_ALL);
-	GPUCMD_AddMaskedWrite(GPUREG_0062, 0x1, 0);
-	GPUCMD_AddWrite(GPUREG_0118, 0);
+	GPUCMD_AddMaskedWrite(GPUREG_EARLYDEPTH_TEST1, 0x1, 0);
+	GPUCMD_AddWrite(GPUREG_EARLYDEPTH_TEST2, 0);
 
 	GPU_SetAlphaBlending(
 		GPU_BLEND_ADD,
@@ -486,7 +486,7 @@ N3DS_CreateRenderer(SDL_Window * window, Uint32 flags)
 	GPU_SetDummyTexEnv(5);
 
 	GPUCMD_Finalize();
-	GPUCMD_FlushAndRun(NULL);
+	GPUCMD_FlushAndRun();
 	gspWaitForP3D();
 
 	N3DS_pool_reset(data);
@@ -701,7 +701,7 @@ N3DS_RenderClear(SDL_Renderer *renderer)
 	//Clear the screen
 	u32 color = COL8888(renderer->r, renderer->g, renderer->b, renderer->a);
 
-	GX_SetMemoryFill(NULL, data->gpu_fb_addr, color, &data->gpu_fb_addr[0x2EE00],
+	GX_MemoryFill(data->gpu_fb_addr, color, &data->gpu_fb_addr[0x2EE00],
 		0x201, data->gpu_depth_fb_addr, 0x00000000, &data->gpu_depth_fb_addr[0x2EE00], 0x201);
 	gspWaitForPSC0();
 
@@ -1052,11 +1052,11 @@ N3DS_RenderPresent(SDL_Renderer * renderer)
 
 	GPU_FinishDrawing();
 	GPUCMD_Finalize();
-	GPUCMD_FlushAndRun(NULL);
+	GPUCMD_FlushAndRun();
 	gspWaitForP3D();
 
 	//Copy the GPU rendered FB to the screen FB
-	GX_SetDisplayTransfer(NULL, data->gpu_fb_addr, GX_BUFFER_DIM(240, 400),
+	GX_DisplayTransfer(data->gpu_fb_addr, GX_BUFFER_DIM(240, 400),
 		(u32 *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL),
 		GX_BUFFER_DIM(240, 400), 0x1000);
 
@@ -1066,7 +1066,7 @@ N3DS_RenderPresent(SDL_Renderer * renderer)
 	/* Swap buffers */
 	gfxSwapBuffersGpu();
 	if (data->vsync) {
-		gspWaitForEvent(GSPEVENT_VBlank0, true);
+		gspWaitForEvent(GSPGPU_EVENT_VBlank0, true);
 	}
 
 	//sceGuFinish();
